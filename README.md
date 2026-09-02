@@ -1,7 +1,7 @@
 # Qwen-K
 
-[![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/<your-username>/qwen-k/blob/main/notebook/qwen-k.ipynb)
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/<your-username>/qwen-k/blob/main/notebook/qwen-k.ipynb)
+[![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/kishorsharma/qwen-k/blob/main/notebook/qwen-k.ipynb)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kishorsharma/qwen-k/blob/main/notebook/qwen-k.ipynb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Run **Qwen3.8-27B** on a free Kaggle notebook and get a **public, OpenAI-compatible API** plus a browser chat UI — from one command.
@@ -9,7 +9,7 @@ Run **Qwen3.8-27B** on a free Kaggle notebook and get a **public, OpenAI-compati
 Qwen-K handles the parts that are normally fiddly: picking a CUDA build of llama.cpp that actually uses the GPU, fetching the 19.4 GiB GGUF without stalling, splitting a 27B model across two 16 GB T4s, and exposing everything through a single public URL instead of two tunnels.
 
 ```
-git clone https://github.com/<your-username>/qwen-k.git
+git clone https://github.com/kishorsharma/qwen-k.git
 cd qwen-k
 python launch.py
 ```
@@ -46,7 +46,7 @@ The same notebook works, with one caveat: **free Colab gives you a single 16 GB 
 ### Your own machine
 
 ```
-git clone https://github.com/<your-username>/qwen-k.git
+git clone https://github.com/kishorsharma/qwen-k.git
 cd qwen-k
 python launch.py --no-share
 ```
