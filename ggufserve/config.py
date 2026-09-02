@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -130,3 +132,70 @@ def derive_model_id(filename: str) -> str:
     stem = re.sub(r"\.gguf$", "", filename, flags=re.IGNORECASE)
     stem = stem.replace("_", "-").lower()
     return re.sub(r"-+", "-", stem).strip("-")
+
+
+# ---------------------------------------------------------------------------
+# Working out what the user meant by "this model"
+# ---------------------------------------------------------------------------
+_HF_FILE = re.compile(
+    r"^https?://(?:www\.)?huggingface\.co/([^/]+/[^/]+)/(?:blob|resolve)/([^/]+)/(.+?)(?:\?.*)?$"
+)
+_HF_REPO = re.compile(
+    r"^https?://(?:www\.)?huggingface\.co/([^/]+/[^/]+?)(?:/tree/[^/?]*)?/?(?:\?.*)?$"
+)
+_REPO_ID = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
+@dataclass
+class ModelSource:
+    """What a single `--model` value resolved to.
+
+    `filename` is None when we know the repo but not which file inside it, which
+    is the case worth handling well: it is what the user gets for pasting a repo
+    page, and the answer is to show them the files it contains.
+    """
+
+    repo: str | None = None
+    filename: str | None = None
+    url: str | None = None
+
+
+def parse_source(text: str) -> ModelSource:
+    """Turn whatever the user pasted into a repo, a filename, and a URL.
+
+    Accepts the address-bar URL of a file, the repo page, a bare `owner/repo`,
+    a direct download URL, or a lone filename. The file page in particular has
+    to be translated: Hugging Face serves `/blob/` as an HTML page with status
+    200, so downloading it verbatim yields a web page that fails GGUF
+    validation with a message about magic bytes that explains nothing.
+    """
+    text = text.strip()
+    if not text:
+        raise ValueError("empty model source")
+
+    found = _HF_FILE.match(text)
+    if found:
+        repo, revision, path = found.groups()
+        url = f"https://huggingface.co/{repo}/resolve/{revision}/{path}?download=true"
+        # Keep only the basename: the remote path may sit in a subdirectory, but
+        # locally it is one file in MODEL_DIR.
+        return ModelSource(repo=repo, filename=path.rsplit("/", 1)[-1], url=url)
+
+    found = _HF_REPO.match(text)
+    if found:
+        return ModelSource(repo=found.group(1))
+
+    if text.startswith(("http://", "https://")):
+        name = urlsplit(text).path.rsplit("/", 1)[-1]
+        return ModelSource(filename=name or None, url=text)
+
+    if text.lower().endswith(".gguf") and "/" not in text:
+        return ModelSource(filename=text)
+
+    if _REPO_ID.match(text):
+        return ModelSource(repo=text)
+
+    raise ValueError(
+        f"cannot tell what {text!r} refers to; expected a Hugging Face URL, "
+        "an owner/repo id, a direct download URL, or a .gguf filename"
+    )

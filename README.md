@@ -80,15 +80,26 @@ All of them are also reachable on a public `https://….gradio.live` URL, so a c
 
 ## Serving a different model
 
-Two flags, no editing:
+Find the model's `.gguf` on Hugging Face, copy the URL out of your browser, and pass it to `--model`:
 
 ```
-python launch.py \
-  --model-repo unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF \
-  --model-file DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf
+python launch.py --model https://huggingface.co/unsloth/Qwen3-8B-GGUF/blob/main/Qwen3-8B-Q4_K_M.gguf
 ```
 
-Everything else follows. The API model id is derived from the filename (`deepseek-r1-distill-qwen-7b-q4-k-m`), the download size is read from the server so nothing needs to be looked up, and the chat UI labels itself from `/health`.
+That is the whole change. The `/blob/` page URL is the one you get from the address bar, and it is translated to a real download URL for you.
+
+In the notebook, put the same URL in `MODEL_URL` at the top of cell 2 instead.
+
+Everything downstream follows automatically: the API model id is derived from the filename (`qwen3-8b-q4-k-m`), the download size is read from the server so nothing needs looking up, and the chat UI labels itself from `/health`.
+
+### Finding that URL on Hugging Face
+
+1. Search for the model with **GGUF** in the name — `Qwen3-8B-GGUF`, not `Qwen3-8B`. The plain repo holds the full-precision weights, which llama.cpp cannot load.
+2. Open the **Files** tab. A quantization repo usually holds a dozen `.gguf` files that differ only in size and quality.
+3. Pick one that fits your VRAM, with about 3 GiB spare for the KV cache. Hugging Face shows each file's size next to it. Higher numbers in the name are better quality and larger: `Q4_K_M` is a good default, `Q8_0` is near-lossless, `Q2_K` is small but noticeably degraded.
+4. Click the file, then copy the URL from your browser's address bar. That is what `--model` wants.
+
+Two kinds of file cannot be served, so skip them: **multi-part splits** ending `-00001-of-00002.gguf`, which have to be merged first, and helper files like `mmproj-*.gguf` or `imatrix*.gguf`, which are not weights.
 
 For a permanent change, edit [`ggufserve/config.py`](ggufserve/config.py) instead. Single-GPU setups and mismatched GPU pairs are covered in [docs/configuration.md](docs/configuration.md).
 
@@ -96,16 +107,27 @@ For a permanent change, edit [`ggufserve/config.py`](ggufserve/config.py) instea
 
 ### Kaggle
 
-Open [`notebook/gguf-serve.ipynb`](notebook/gguf-serve.ipynb) and run its two cells. Set the accelerator to **GPU T4 x2** first (*Settings → Accelerator*) — the default model needs about 23 GiB of VRAM, which is two T4s.
+Open [`notebook/gguf-serve.ipynb`](notebook/gguf-serve.ipynb) and run cell 1, then cell 2. Set the accelerator to **GPU T4 x2** first (*Settings → Accelerator*) — the default model needs about 23 GiB of VRAM, which is two T4s.
 
-Leave the second cell running. The server lives inside it, so stopping the cell takes the public URL down with it.
+You do not need the flags below in the notebook. Cell 2 opens with every setting as a named constant, already holding its shipped default, so changing the model or the context is a matter of editing a value in place:
+
+```python
+MODEL_REPO = "unsloth/Qwen3.8-27B-GGUF"
+MODEL_FILE = "Qwen3.8-27B-UD-Q5_K_XL.gguf"
+CTX = 16384
+KV_CACHE = "f16"
+TENSOR_SPLIT = "1,1"
+```
+
+Leave cell 2 running. The server lives inside it, so stopping the cell takes the public URL down with it.
 
 ### Colab
 
-The same notebook works, with one caveat: **free Colab gives you a single 16 GB T4**, and the default model does not fit. Either use an L4 or A100 runtime, or pick a model that fits one card:
+The same notebook works, with one caveat: **free Colab gives you a single 16 GB T4**, and the default model does not fit. Either use an L4 or A100 runtime, or pick a model that fits one card — in cell 2:
 
-```
-python launch.py --model-file Qwen3.8-27B-UD-Q3_K_XL.gguf
+```python
+MODEL_FILE = "Qwen3.8-27B-UD-Q3_K_XL.gguf"
+TENSOR_SPLIT = "none"
 ```
 
 ### Your own machine
@@ -120,6 +142,7 @@ python launch.py --no-share
 
 | Flag | Default | Effect |
 | --- | --- | --- |
+| `--model` | — | A Hugging Face URL or `.gguf` filename; sets the three below at once |
 | `--model-file` | `Qwen3.8-27B-UD-Q5_K_XL.gguf` | The `.gguf` to serve |
 | `--model-repo` | `unsloth/Qwen3.8-27B-GGUF` | Hugging Face repo holding it |
 | `--model-url` | — | Download from here instead of Hugging Face |
@@ -127,6 +150,7 @@ python launch.py --no-share
 | `--ctx` | `16384` | Context window in tokens; see the table below |
 | `--gpu-layers` | `-1` | Layers on the GPU; `-1` means all |
 | `--kv-cache-type` | `f16` | `q8_0` halves what a long context costs |
+| `--tensor-split` | `1.0,1.0` | GPU split; `1,2` for 16 GB + 32 GB, `none` for one GPU |
 | `--port` | `7860` | Falls forward to the next free port if taken |
 | `--no-share` | off | Local access only, no public URL |
 | `--no-reasoning` | off | Pass output through without splitting off `</think>` |

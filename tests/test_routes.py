@@ -13,6 +13,7 @@ Needs neither llama-cpp-python nor Gradio, so it is safe to run on a laptop.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import json
@@ -32,7 +33,8 @@ from fastapi.testclient import TestClient
 
 from ggufserve import api, chat, config, model, server, system, webui
 from ggufserve.chat import split_response
-from launch import _count_steps
+import launch
+from launch import _count_steps, _parse_split
 
 REASONING = "Let me think. 17*23 = 391."
 ANSWER = "17 x 23 = **391**."
@@ -67,6 +69,39 @@ class StubLlama:
                 self._active -= 1
 
         return chunks()
+
+
+def _notebook_settings() -> dict:
+    """The constants a reader edits at the top of the serve cell.
+
+    Read by executing the assignments only: the rest of the cell shells out to
+    launch.py, which is not something a test should do.
+    """
+    notebook = json.loads(
+        (REPO_ROOT / "notebook" / "gguf-serve.ipynb").read_text(encoding="utf-8")
+    )
+    cell = next(
+        "".join(c["source"])
+        for c in notebook["cells"]
+        if c["cell_type"] == "code" and "KV_CACHE" in "".join(c["source"])
+    )
+
+    settings: dict = {}
+    for line in cell.splitlines():
+        match = re.match(r"^([A-Z][A-Z0-9_]*) = (.+?)(?:\s+#.*)?$", line)
+        if match:
+            settings[match.group(1)] = ast.literal_eval(match.group(2))
+    return settings
+
+
+def _raises(exception, fn, *args) -> bool:
+    try:
+        fn(*args)
+    except exception:
+        return True
+    except Exception:
+        return False
+    return False
 
 
 def _captured(fn) -> str:
@@ -440,6 +475,89 @@ def main() -> int:
         llm.max_concurrent == 1,
         f"peak concurrency was {llm.max_concurrent}",
     )
+
+    check.section("model source parsing")
+    HF = "https://huggingface.co/unsloth/Qwen3-8B-GGUF"
+
+    # The address bar of a file page is what people actually paste, and Hugging
+    # Face serves /blob/ as HTML with status 200 — so getting this wrong means
+    # downloading a web page and failing on GGUF magic bytes.
+    blob = config.parse_source(f"{HF}/blob/main/Qwen3-8B-Q4_K_M.gguf")
+    check("a file page URL yields the repo", blob.repo == "unsloth/Qwen3-8B-GGUF")
+    check("a file page URL yields the filename", blob.filename == "Qwen3-8B-Q4_K_M.gguf")
+    check("/blob/ is rewritten to /resolve/", "/resolve/main/" in blob.url)
+    check("and never left as /blob/", "/blob/" not in blob.url)
+
+    direct = config.parse_source(f"{HF}/resolve/main/Qwen3-8B-Q4_K_M.gguf")
+    check("a resolve URL survives intact", direct.url.startswith(f"{HF}/resolve/main/"))
+
+    nested = config.parse_source(f"{HF}/blob/main/BF16/split.gguf")
+    check("a subdirectory keeps the full remote path", "/main/BF16/split.gguf" in nested.url)
+    check("but stores only the basename locally", nested.filename == "split.gguf")
+
+    for label, text in (
+        ("a repo page URL", HF),
+        ("a tree URL", f"{HF}/tree/main"),
+        ("a bare owner/repo id", "unsloth/Qwen3-8B-GGUF"),
+    ):
+        parsed = config.parse_source(text)
+        check(f"{label} gives a repo and no file", parsed.repo and not parsed.filename)
+
+    other = config.parse_source("https://example.com/models/custom.gguf")
+    check("a non-HF URL is used verbatim", other.url == "https://example.com/models/custom.gguf")
+    check("with its filename taken from the path", other.filename == "custom.gguf")
+
+    plain = config.parse_source("Qwen3-8B-Q4_K_M.gguf")
+    check("a bare filename is just a filename", plain.filename and not plain.repo)
+
+    for bad in ("", "   ", "not a url", "///"):
+        check(f"{bad!r} is rejected", _raises(ValueError, config.parse_source, bad))
+
+    # A repo names no file, and guessing one wrong wastes a 20 GiB download, so
+    # this has to be a refusal rather than a default.
+    args = launch.parse_args(["--model", "unsloth/Qwen3-8B-GGUF"])
+    check(
+        "a bare repo is refused, not guessed at",
+        _raises(SystemExit, launch._apply_model_arg, args),
+    )
+
+    check.section("notebook settings mirror config.py")
+    # The cell presents these as "the shipped defaults", so they have to be the
+    # shipped defaults. Left unchecked they would quietly become a second,
+    # stale source of truth that silently overrides the first.
+    settings = _notebook_settings()
+    expected = {
+        "MODEL_REPO": config.MODEL_REPO,
+        "MODEL_FILE": config.MODEL_FILE,
+        "MODEL_DIR": str(config.MODEL_DIR),
+        "CTX": config.CTX_SIZE,
+        "KV_CACHE": config.KV_CACHE_TYPE,
+        "GPU_LAYERS": config.N_GPU_LAYERS,
+        "PORT": config.SERVER_PORT,
+        "SHARE": config.SHARE,
+        "PARSE_REASONING": config.PARSE_REASONING,
+    }
+    check("every setting was found in the cell", set(expected) <= set(settings))
+    for name, value in expected.items():
+        check(f"{name} matches config.py", settings.get(name) == value)
+
+    check(
+        "MODEL_URL is blank so the repo and file above apply",
+        settings.get("MODEL_URL") == "",
+    )
+    check(
+        "TENSOR_SPLIT matches config.py once parsed",
+        _parse_split(settings.get("TENSOR_SPLIT", "")) == config.TENSOR_SPLIT,
+    )
+
+    check.section("tensor split parsing")
+    check("a matched pair", _parse_split("1,1") == [1.0, 1.0])
+    check("a weighted pair", _parse_split("1,2") == [1.0, 2.0])
+    check("whitespace is tolerated", _parse_split(" 1.0 , 1.0 ") == [1.0, 1.0])
+    check("a single GPU is spelled none", _parse_split("none") is None)
+    check("as is an empty value", _parse_split("") is None)
+    for bad in ("1,x", "0,1", "-1,2", "abc"):
+        check(f"{bad!r} is rejected", _raises(SystemExit, _parse_split, bad))
 
     check.section("progress reporting")
     system.set_total_steps(3)

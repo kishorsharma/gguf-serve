@@ -4,39 +4,50 @@ Everything tunable lives in [`ggufserve/config.py`](../ggufserve/config.py). Mos
 
 | Setting | Flag | Default |
 | --- | --- | --- |
+| — | `--model` | — (sets the next three together) |
+| — | `--list-models` | — (prints a repo's files and exits) |
 | `MODEL_FILE` | `--model-file` | `Qwen3.8-27B-UD-Q5_K_XL.gguf` |
 | `MODEL_REPO` | `--model-repo` | `unsloth/Qwen3.8-27B-GGUF` |
 | `MODEL_URL` | `--model-url` | derived from repo + file |
 | `MODEL_DIR` | `--model-dir` | `/tmp/gguf-serve/models` |
 | `CTX_SIZE` | `--ctx` | `16384` |
+| `KV_CACHE_TYPE` | `--kv-cache-type` | `f16` |
 | `N_GPU_LAYERS` | `--gpu-layers` | `-1` (all) |
+| `TENSOR_SPLIT` | `--tensor-split` | `1.0,1.0` |
 | `SERVER_PORT` | `--port` | `7860` |
 | `SHARE` | `--no-share` | on |
 | `PARSE_REASONING` | `--no-reasoning` | on |
 
 `MODEL_DIR` also reads the `GGUF_SERVE_MODEL_DIR` environment variable, which is handy in notebooks where editing a file is awkward.
 
+**In the notebook you do not need any of these flags.** Cell 2 of [`notebook/gguf-serve.ipynb`](../notebook/gguf-serve.ipynb) declares each one as a named constant holding the same default, and builds the command for you — so the settings are visible and editable at the point of use rather than something you have to know to ask for. A test asserts those constants still match this file, so the two cannot drift apart.
+
 ## Choosing a model
 
-Any single-file GGUF that llama.cpp can load. Point at a Hugging Face repo and a filename inside it:
+Any single-file GGUF that llama.cpp can load. The shortest route is `--model` with the URL of the file's page on Hugging Face, exactly as it appears in your address bar:
 
 ```
-python launch.py \
-  --model-repo bartowski/Meta-Llama-3.1-8B-Instruct-GGUF \
-  --model-file Meta-Llama-3.1-8B-Instruct-Q5_K_M.gguf
+python launch.py --model https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/blob/main/Meta-Llama-3.1-8B-Instruct-Q5_K_M.gguf
 ```
 
-Nothing else needs configuring. The expected download size is read from the server with a `HEAD` request, so a truncated transfer is caught without you having to look up a byte count, and the API model id is derived from the filename — `meta-llama-3.1-8b-instruct-q5-k-m` here. Override it with `MODEL_ID` if you want a specific name.
+`--model` accepts four different things and works out which you meant:
+
+| You pass | It resolves to |
+| --- | --- |
+| `.../blob/main/file.gguf` | the repo, the filename, and a real download URL |
+| `.../resolve/main/file.gguf` | the same, used as given |
+| `https://elsewhere/file.gguf` | a direct download, filename taken from the path |
+| `file.gguf` | a filename inside the current `MODEL_REPO` |
+
+The `/blob/` case is the one that matters most. It is what the browser gives you, and Hugging Face serves it as an **HTML page with status 200** — so handing it to `--model-url` unchanged downloads a web page that then fails validation complaining about magic bytes. `--model` rewrites it to the `/resolve/` path that returns the actual file.
+
+A repo on its own — `--model owner/repo` — is refused rather than guessed at, because a quantization repo holds a dozen files spanning 20 GiB and picking one blind is a coin flip on whether it fits. Name the file, or pass its page URL.
+
+`--model-repo`, `--model-file`, and `--model-url` still exist and still work; anything you set explicitly beats what `--model` infers.
+
+Nothing else needs configuring once a model is chosen. The expected download size is read from the server with a `HEAD` request, so a truncated transfer is caught without you having to look up a byte count, and the API model id is derived from the filename — `meta-llama-3.1-8b-instruct-q5-k-m` above. Override it with `MODEL_ID` if you want a specific name.
 
 Multi-part splits (`…-00001-of-00002.gguf`) are **not** supported; the model has to be one file.
-
-To fetch from somewhere other than Hugging Face, give a direct URL:
-
-```
-python launch.py --model-url https://example.com/models/my-model.gguf
-```
-
-`MODEL_FILE` is still used as the local filename, so set both.
 
 ### Picking a size that fits
 

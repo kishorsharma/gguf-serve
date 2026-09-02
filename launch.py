@@ -20,6 +20,24 @@ from ggufserve import config
 from ggufserve.version import version
 
 
+def _format_split(split: list[float] | None) -> str:
+    return "none" if not split else ",".join(str(part) for part in split)
+
+
+def _parse_split(text: str) -> list[float] | None:
+    """Read a tensor split, where a single GPU is spelled `none`."""
+    text = text.strip()
+    if not text or text.lower() in {"none", "off"}:
+        return None
+    try:
+        parts = [float(part) for part in text.split(",") if part.strip()]
+    except ValueError:
+        raise SystemExit(f"--tensor-split: {text!r} is not a comma-separated list of numbers")
+    if not parts or any(part <= 0 for part in parts):
+        raise SystemExit(f"--tensor-split: {text!r} must be positive numbers, e.g. 1,1")
+    return parts
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="launch.py",
@@ -31,6 +49,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     model = parser.add_argument_group("model")
+    model.add_argument(
+        "--model",
+        metavar="URL_OR_ID",
+        help="what to serve: a Hugging Face file URL (the address bar of the "
+        ".gguf page works), an owner/repo id, a direct download URL, or a "
+        ".gguf filename. Sets --model-repo, --model-file and --model-url "
+        "together",
+    )
     model.add_argument(
         "--model-file",
         default=config.MODEL_FILE,
@@ -69,6 +95,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["f16", "q8_0"],
         default=config.KV_CACHE_TYPE,
         help="KV cache precision; q8_0 halves the memory a long context needs",
+    )
+    model.add_argument(
+        "--tensor-split",
+        default=_format_split(config.TENSOR_SPLIT),
+        help="how to divide the model across GPUs, e.g. 1,1 for a matched pair "
+        "or 1,2 for 16 GB plus 32 GB; 'none' for a single GPU",
     )
 
     server = parser.add_argument_group("server")
@@ -130,8 +162,40 @@ def _count_steps(args) -> int:
     return total
 
 
+def _apply_model_arg(args) -> None:
+    """Fold a single `--model` value into the individual model settings.
+
+    Explicit --model-repo/--model-file/--model-url still win, so `--model
+    owner/repo --model-file x.gguf` behaves the way it reads.
+    """
+    try:
+        source = config.parse_source(args.model)
+    except ValueError as error:
+        raise SystemExit(f"--model: {error}")
+
+    if source.repo and args.model_repo == config.MODEL_REPO:
+        args.model_repo = source.repo
+    if source.filename and args.model_file == config.MODEL_FILE:
+        args.model_file = source.filename
+    if source.url and args.model_url == config.MODEL_URL:
+        args.model_url = source.url
+
+    # A repo with no file named is the one case we cannot guess at: repos hold a
+    # dozen quantizations that differ by 10 GiB, so picking one would be a coin
+    # flip on whether it even fits.
+    if source.repo and not source.filename and args.model_file == config.MODEL_FILE:
+        raise SystemExit(
+            f"--model: {source.repo} is a repo, not a file. Open it on Hugging "
+            "Face, click the .gguf you want, and pass that page's URL — or add "
+            "--model-file <name>.gguf."
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+
+    if args.model:
+        _apply_model_arg(args)
 
     # Applied before any other module reads them.
     config.MODEL_FILE = args.model_file
@@ -141,6 +205,7 @@ def main(argv: list[str] | None = None) -> None:
     config.CTX_SIZE = args.ctx
     config.N_GPU_LAYERS = args.gpu_layers
     config.KV_CACHE_TYPE = args.kv_cache_type
+    config.TENSOR_SPLIT = _parse_split(args.tensor_split)
     if args.no_reasoning:
         config.PARSE_REASONING = False
 
