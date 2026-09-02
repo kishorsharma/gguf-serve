@@ -96,9 +96,49 @@ If the entry count does not match the number of visible GPUs, gguf-serve warns a
 
 ## Context size
 
-`CTX_SIZE` is 16384. The KV cache grows linearly with it, so raising it costs VRAM; if loading fails after a bump, this is the first thing to bring back down. `--ctx 8192` frees a couple of GiB.
+Context is measured in **tokens, not bytes** — roughly 0.75 words or 4 characters each, so 16K tokens is about 12,000 words. A "1 MB context" is not a thing you can ask for.
 
-Note that a model's own trained context length is an upper bound worth respecting — setting `--ctx` above it degrades output rather than extending usable memory.
+Every model has a hard ceiling built into its weights. For Qwen3.8-27B that is **262,144 tokens (256K)**. Setting `--ctx` above a model's ceiling does not extend its memory; it degrades output, because the model is being used beyond the positions it was trained for. So 512K and 1M are not available for this model — you would need a model trained for them, such as the Qwen2.5-1M series.
+
+### Quick reference for Qwen3.8-27B on 2 × 16 GB
+
+The KV cache is allocated for the whole context up front, and its size is what decides whether a context length fits. For this model it costs **64 KiB per token** at `f16`, or **32 KiB per token** at `q8_0`.
+
+Totals below include the Q5\_K\_XL weights and about 1 GiB of buffers. Usable VRAM on 2 × T4 is roughly 29.1 GiB, since the driver reserves a little of each card.
+
+| `--ctx` | Tokens | KV f16 | Total f16 | KV q8_0 | Total q8_0 | On 2 × T4 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `8192` | 8K | 0.5 GiB | 21.0 GiB | 0.2 GiB | 20.7 GiB | comfortable |
+| `16384` | 16K | 1.0 GiB | 21.5 GiB | 0.5 GiB | 21.0 GiB | **default**, comfortable |
+| `32768` | 32K | 2.0 GiB | 22.5 GiB | 1.0 GiB | 21.5 GiB | comfortable |
+| `65536` | 64K | 4.0 GiB | 24.5 GiB | 2.0 GiB | 22.5 GiB | comfortable |
+| `131072` | 128K | 8.0 GiB | 28.5 GiB | 4.0 GiB | 24.5 GiB | tight at f16; fine at q8\_0 |
+| `262144` | 256K | 16.0 GiB | 36.5 GiB | 8.0 GiB | 28.5 GiB | q8\_0 only, and tight |
+
+So the practical picks are **64K comfortably**, **128K with `--kv-cache-type q8_0`**, and the model's full **256K only by also dropping to a smaller quantization**:
+
+```
+# 128K, comfortable
+python launch.py --ctx 131072 --kv-cache-type q8_0
+
+# 256K, the model's maximum — needs the smaller weights to leave room
+python launch.py --ctx 262144 --kv-cache-type q8_0 \
+                --model-file Qwen3.8-27B-UD-Q4_K_XL.gguf
+```
+
+The startup summary prints actual VRAM use per GPU, which is the real check — a number well below capacity means llama.cpp spilled layers to system RAM and you should reduce the context.
+
+### Why this model stretches so far
+
+A dense 27B model would need roughly 4 × this much KV cache. Qwen3.8-27B is a **hybrid**: of its 64 layers only 16 use full attention, and the other 48 use linear attention whose state is a fixed size regardless of how long the context gets. Only those 16 layers grow with `--ctx`, which is what makes a 256K context conceivable on consumer hardware at all.
+
+If you switch to a conventional dense model, expect these numbers to be several times worse and scale your context down accordingly.
+
+### KV cache precision
+
+`KV_CACHE_TYPE` is `f16`, llama.cpp's default. `q8_0` halves the cache for a small quality cost, and is the difference between a long context fitting and not.
+
+Selecting it also turns on flash attention, because llama.cpp can only read a quantized cache through it. That needs a build with flash-attention support for your GPU; T4 and newer qualify. If loading fails right after you switch, this is the reason — go back to `f16` and use a shorter context instead.
 
 ## Reasoning models
 

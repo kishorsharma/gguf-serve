@@ -30,7 +30,7 @@ When it is ready you get everything you need in one block:
 
   model        qwen3.8-27b-ud-q5-k-xl
   file         Qwen3.8-27B-UD-Q5_K_XL.gguf  (19.44 GiB)
-  context      16,384 tokens
+  context      16,384 tokens (KV cache f16)
   reasoning    </think> sections split off
 
   GPU 0        Tesla T4  10.1 / 15.0 GiB (68%)  util 2%  49C
@@ -109,14 +109,34 @@ python launch.py --no-share
 | `--model-repo` | `unsloth/Qwen3.8-27B-GGUF` | Hugging Face repo holding it |
 | `--model-url` | — | Download from here instead of Hugging Face |
 | `--model-dir` | `/tmp/gguf-serve/models` | Where the `.gguf` is stored |
-| `--ctx` | `16384` | Context window; lower it if the model will not fit |
+| `--ctx` | `16384` | Context window in tokens; see the table below |
 | `--gpu-layers` | `-1` | Layers on the GPU; `-1` means all |
+| `--kv-cache-type` | `f16` | `q8_0` halves what a long context costs |
 | `--port` | `7860` | Falls forward to the next free port if taken |
 | `--no-share` | off | Local access only, no public URL |
 | `--no-reasoning` | off | Pass output through without splitting off `</think>` |
 | `--skip-install` | off | Trust the environment, skip dependency checks |
 | `--skip-smoke-test` | off | Serve without checking that the model generates |
 | `--download-only` | off | Fetch and verify the model, then exit |
+
+### Context length quick reference
+
+Context is measured in **tokens**, and every model has a ceiling baked into its weights — for Qwen3.8-27B that is 262,144 (256K). Going above it degrades output rather than extending memory, so 512K and 1M are not available for this model.
+
+What fits 2 × 16 GB at the default Q5\_K\_XL, including weights:
+
+| `--ctx` | | Total VRAM | On 2 × T4 |
+| --- | --- | --- | --- |
+| `16384` | 16K | 21.5 GiB | **default**, comfortable |
+| `65536` | 64K | 24.5 GiB | comfortable |
+| `131072` | 128K | 28.5 GiB | tight; use `--kv-cache-type q8_0` |
+| `262144` | 256K | 28.5 GiB with `q8_0` | needs `q8_0` and smaller weights |
+
+```
+python launch.py --ctx 131072 --kv-cache-type q8_0
+```
+
+This model stretches unusually far because it is a hybrid: only 16 of its 64 layers use full attention, so only those grow with context. A conventional dense model of the same size needs roughly 4× the KV cache — scale down accordingly if you switch. Full numbers and the reasoning are in [docs/configuration.md](docs/configuration.md).
 
 ## Using the API
 

@@ -19,6 +19,10 @@ from ggufserve.system import free_disk_gib, gpu_count, gpu_stats, ok, step, warn
 
 GGUF_MAGIC = b"GGUF"
 
+# ggml type ids, from llama_cpp.GGML_TYPE_*. Hardcoded so the mapping is
+# readable here rather than hidden behind an import of the CUDA extension.
+KV_CACHE_TYPES = {"f16": 1, "q8_0": 8}
+
 
 def remote_size(url: str) -> int | None:
     """The size the server reports for `url`, or None if it cannot be determined.
@@ -157,6 +161,15 @@ def load(path: Path):
     """Load the GGUF across the available GPUs and return the Llama handle."""
     step("Loading model")
 
+    # Checked before the expensive llama_cpp import so a bad value in
+    # config.py reports itself instead of surfacing as an import error.
+    kv_type = config.KV_CACHE_TYPE
+    if kv_type not in KV_CACHE_TYPES:
+        raise SystemExit(
+            f"Unknown KV_CACHE_TYPE {kv_type!r}. "
+            f"Choose one of: {', '.join(KV_CACHE_TYPES)}"
+        )
+
     from llama_cpp import Llama
 
     gpus = gpu_count()
@@ -173,12 +186,23 @@ def load(path: Path):
 
     print(f"   {path.name}")
     print(
-        f"   context {config.CTX_SIZE}, gpu_layers {config.N_GPU_LAYERS}, "
-        f"tensor_split {tensor_split}"
+        f"   context {config.CTX_SIZE:,}, gpu_layers {config.N_GPU_LAYERS}, "
+        f"tensor_split {tensor_split}, kv cache {kv_type}"
     )
     print("   this takes a few minutes")
 
     threads = max(4, os.cpu_count() or 4)
+
+    extra = {}
+    if kv_type != "f16":
+        ggml_type = KV_CACHE_TYPES[kv_type]
+        # llama.cpp can only read a quantized KV cache through flash attention,
+        # so selecting one implies enabling it.
+        extra = {
+            "type_k": ggml_type,
+            "type_v": ggml_type,
+            "flash_attn": True,
+        }
 
     llm = Llama(
         model_path=str(path),
@@ -192,6 +216,7 @@ def load(path: Path):
         n_threads=threads,
         n_threads_batch=threads,
         verbose=False,
+        **extra,
     )
 
     ok("model loaded")

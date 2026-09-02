@@ -143,7 +143,7 @@ def print_summary(
     if model_path is not None and model_path.exists():
         size = f"  ({human_size(model_path.stat().st_size)})"
     print(f"  file         {config.MODEL_FILE}{size}")
-    print(f"  context      {config.CTX_SIZE:,} tokens")
+    print(f"  context      {config.CTX_SIZE:,} tokens (KV cache {config.KV_CACHE_TYPE})")
     print(
         "  reasoning    "
         + ("</think> sections split off" if config.PARSE_REASONING else "not parsed")

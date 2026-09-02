@@ -64,6 +64,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=config.N_GPU_LAYERS,
         help="layers to offload to the GPU; -1 means all of them",
     )
+    model.add_argument(
+        "--kv-cache-type",
+        choices=["f16", "q8_0"],
+        default=config.KV_CACHE_TYPE,
+        help="KV cache precision; q8_0 halves the memory a long context needs",
+    )
 
     server = parser.add_argument_group("server")
     server.add_argument(
@@ -116,6 +122,7 @@ def main(argv: list[str] | None = None) -> None:
     config.MODEL_DIR = args.model_dir
     config.CTX_SIZE = args.ctx
     config.N_GPU_LAYERS = args.gpu_layers
+    config.KV_CACHE_TYPE = args.kv_cache_type
     if args.no_reasoning:
         config.PARSE_REASONING = False
 

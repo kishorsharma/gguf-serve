@@ -43,6 +43,15 @@ CTX_SIZE = 16384
 N_BATCH = 512
 N_UBATCH = 512
 
+# KV cache precision, "f16" or "q8_0".
+#
+# The cache is allocated for the full context up front and is what makes long
+# contexts expensive. "q8_0" halves its size for a small quality cost, which is
+# what makes the longest contexts fit at all — see docs/configuration.md for the
+# numbers. It needs a llama.cpp build with flash attention for your GPU, which
+# gguf-serve enables automatically when you select it.
+KV_CACHE_TYPE = "f16"
+
 # -1 offloads every layer to the GPU. Lower it to keep some layers on the CPU
 # when a model is slightly too big for your VRAM.
 N_GPU_LAYERS = -1

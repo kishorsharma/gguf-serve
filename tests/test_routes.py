@@ -308,6 +308,26 @@ def main() -> int:
             model.validate(Path(tmp) / "nope.gguf")[0] is False,
         )
 
+    check.section("kv cache type")
+    check("f16 and q8_0 map to ggml type ids", model.KV_CACHE_TYPES == {"f16": 1, "q8_0": 8})
+
+    # Must be rejected before the llama_cpp import, so a bad config value gives
+    # a clear message rather than an ImportError on a machine without CUDA.
+    try:
+        _with_config(
+            lambda: model.load(Path("/nonexistent.gguf")),
+            KV_CACHE_TYPE="bogus",
+        )
+        check("a bad KV_CACHE_TYPE is rejected", False, "no error raised")
+    except SystemExit as error:
+        check("a bad KV_CACHE_TYPE is rejected early", "bogus" in str(error), str(error))
+    except ImportError as error:
+        check(
+            "a bad KV_CACHE_TYPE is rejected early",
+            False,
+            f"reached llama_cpp import first: {error}",
+        )
+
     check.section("host stats")
     # nvidia-smi output as it really looks with --noheader --nounits, including
     # the [N/A] readings some cards and VMs return.
