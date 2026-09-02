@@ -10,6 +10,7 @@ const temperatureValue = document.getElementById("tempv");
 const showReasoning = document.getElementById("thinking");
 const statusLabel = document.getElementById("status");
 const subtitle = document.getElementById("subtitle");
+const title = document.getElementById("title");
 
 const THINK_END = "</think>";
 
@@ -17,7 +18,9 @@ const THINK_END = "</think>";
 // own scratchpad on the next turn.
 let history = [];
 let controller = null;
-let modelId = "qwen3.8-27b-q5-k-xl";
+
+// Replaced by whatever /health reports, so this page works against any model.
+let modelId = "";
 
 temperature.oninput = () => {
   temperatureValue.textContent = Number(temperature.value).toFixed(2);
@@ -238,6 +241,8 @@ fetch("/health")
   .then((response) => response.json())
   .then((info) => {
     modelId = info.model || modelId;
+    document.title = info.model || "gguf-serve";
+    title.textContent = info.model || "gguf-serve";
     subtitle.textContent = `${info.model_file} · ${info.context} token context · OpenAI-compatible API`;
   })
   .catch(() => {});

@@ -1,9 +1,4 @@
-"""Dependency setup, skipped entirely when the environment is already correct.
-
-Originally cells "02 - Install/verify llama-cpp-python", "09 - Install/verify
-Gradio web stack", "10 - Clean-import test for Gradio" and "11 - Verify the
-Hugging Face issue is not active".
-"""
+"""Dependency setup, skipped entirely when the environment is already correct."""
 
 from __future__ import annotations
 
@@ -11,8 +6,8 @@ import importlib.metadata as metadata
 import subprocess
 import sys
 
-from qwenk import config
-from qwenk.system import ok, step, warn
+from ggufserve import config
+from ggufserve.system import ok, step, warn
 
 
 def _pip(*args: str) -> None:

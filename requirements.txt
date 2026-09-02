@@ -1,4 +1,4 @@
-# Qwen-K runtime requirements.
+# gguf-serve runtime requirements.
 #
 # `python launch.py` installs and verifies these automatically, so you normally
 # do not need to run pip yourself. Install manually only for offline setups:
@@ -13,7 +13,12 @@
 #   pip install --only-binary=:all: llama-cpp-python \
 #       --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu125
 #
-# qwenk/installer.py picks the right cuXXX index for your driver.
+# ggufserve/installer.py picks the right cuXXX index for your driver.
 
 gradio==6.26.0
 gradio_client==2.6.1
+
+# For `python tests/test_routes.py` only. Gradio already pulls in fastapi and
+# httpx, so this is just what a bare test run needs.
+# fastapi
+# httpx

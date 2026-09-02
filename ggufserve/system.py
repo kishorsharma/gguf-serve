@@ -1,7 +1,4 @@
-"""Host inspection and small console helpers.
-
-Originally cell "01 - Verify Kaggle hardware/runtime".
-"""
+"""Host inspection and small console helpers."""
 
 from __future__ import annotations
 
@@ -93,6 +90,6 @@ def report(model_dir: Path) -> None:
         for line in summary.splitlines():
             print(f"   gpu    : {line}")
     else:
-        warn("No NVIDIA GPU detected. Qwen-K needs CUDA to be useful.")
+        warn("No NVIDIA GPU detected. gguf-serve needs CUDA to be useful.")
 
     print(f"   models : {model_dir} ({free_disk_gib(model_dir):.1f} GiB free)")

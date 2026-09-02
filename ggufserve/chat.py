@@ -1,32 +1,29 @@
-"""Generation and Qwen reasoning-tag handling.
-
-Originally cells "06 - Smoke test", "07 - Qwen reasoning parser" and the
-`generate_sync` helper from cell 12.
-"""
+"""Generation and reasoning-tag handling."""
 
 from __future__ import annotations
 
 import threading
 from typing import Any, Iterator
 
-from qwenk import config
-from qwenk.system import ok, step
+from ggufserve import config
+from ggufserve.system import ok, step
 
 THINK_END = "</think>"
 THINK_START = "<think>"
 
-# This 2xT4 setup is configured for one generation at a time: a single llama.cpp
-# context cannot serve concurrent requests, and letting two overlap corrupts the
-# KV cache and interleaves tokens between responses. Requests queue here.
+# One llama.cpp context cannot serve concurrent requests: letting two overlap
+# corrupts the KV cache and interleaves tokens between responses. Requests queue
+# here instead.
 _lock = threading.Lock()
 
 
 def split_response(content: str) -> tuple[str, str]:
-    """Split raw Qwen output into (reasoning, answer).
+    """Split raw output into (reasoning, answer).
 
-    Qwen3.8 emits its reasoning first and closes it with `</think>`. In practice
-    the opening `<think>` is often absent, so the closing tag is what we key on.
-    Text with no closing tag is treated as a plain answer.
+    Reasoning models emit their scratchpad first and close it with `</think>`.
+    The opening `<think>` is often absent, so the closing tag is what we key on.
+    Text with no closing tag is treated as a plain answer, which is what makes
+    this safe for ordinary models.
     """
     if not content:
         return "", ""
@@ -41,6 +38,13 @@ def split_response(content: str) -> tuple[str, str]:
         reasoning = reasoning[len(THINK_START):].strip()
 
     return reasoning, answer.strip()
+
+
+def separate(content: str) -> tuple[str, str]:
+    """Like `split_response`, but honours the PARSE_REASONING setting."""
+    if not config.PARSE_REASONING:
+        return "", content.strip()
+    return split_response(content)
 
 
 def generate(
@@ -66,8 +70,9 @@ def generate(
     }
 
     # Note: llama-cpp-python 0.3.35 does not accept `chat_template_kwargs` in
-    # create_chat_completion, so Qwen's `enable_thinking` template switch cannot
-    # be forwarded. Reasoning is always generated and stripped afterwards.
+    # create_chat_completion, so template switches such as Qwen's
+    # `enable_thinking` cannot be forwarded. Reasoning is always generated and
+    # stripped afterwards.
     with _lock:
         for chunk in llm.create_chat_completion(**params):
             piece = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
@@ -79,23 +84,26 @@ def smoke_test(llm) -> None:
     """Prove the model actually produces tokens before we expose a public URL."""
     step("Running smoke test")
 
+    prompt = "In one short sentence, what is a large language model?"
+
     raw = "".join(
         generate(
             llm,
-            [{"role": "user", "content": "What is 17 x 23? Answer briefly."}],
+            [{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=128,
+            max_tokens=192,
         )
     )
 
-    _, answer = split_response(raw)
-    print(f"   prompt : What is 17 x 23?")
+    _, answer = separate(raw)
+
+    print(f"   prompt : {prompt}")
     print(f"   answer : {answer.replace(chr(10), ' ')[:160]}")
 
     if not answer.strip():
         raise SystemExit(
-            "The model loaded but produced no answer. Refusing to start the "
-            "server. See docs/troubleshoot.md."
+            "The model loaded but produced no answer, so the server was not "
+            "started. See docs/troubleshoot.md."
         )
 
     ok("model is generating")

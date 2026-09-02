@@ -1,7 +1,5 @@
 """OpenAI-compatible API routes.
 
-Originally cell "12 - Build the Gradio Server application".
-
 Streaming responses carry the model's raw output, `</think>` reasoning tags
 included, and the client separates them. That is what the bundled web UI does,
 and it is the behaviour third-party OpenAI clients were tested against. Send
@@ -19,12 +17,12 @@ from typing import Any, Dict, List, Optional
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from qwenk import config
-from qwenk.chat import generate, split_response
+from ggufserve import config
+from ggufserve.chat import generate, separate
 
 
 class ChatCompletionRequest(BaseModel):
-    model: Optional[str] = config.MODEL_ID
+    model: Optional[str] = None
     messages: List[Dict[str, Any]]
     temperature: float = config.TEMPERATURE
     top_p: float = config.TOP_P
@@ -50,10 +48,8 @@ def _chunk(request_id: str, delta: dict, finish_reason: str | None = None) -> di
         "id": request_id,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
-        "model": config.MODEL_ID,
-        "choices": [
-            {"index": 0, "delta": delta, "finish_reason": finish_reason}
-        ],
+        "model": config.model_id(),
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     }
 
 
@@ -64,9 +60,10 @@ def register(app, llm) -> None:
     async def health():
         return {
             "status": "ok",
-            "model": config.MODEL_ID,
+            "model": config.model_id(),
             "model_file": config.MODEL_FILE,
             "context": config.CTX_SIZE,
+            "parse_reasoning": config.PARSE_REASONING,
         }
 
     @app.get("/v1/models", tags=["openai"])
@@ -75,10 +72,10 @@ def register(app, llm) -> None:
             "object": "list",
             "data": [
                 {
-                    "id": config.MODEL_ID,
+                    "id": config.model_id(),
                     "object": "model",
                     "created": int(time.time()),
-                    "owned_by": "qwen-k",
+                    "owned_by": "gguf-serve",
                 }
             ],
         }
@@ -113,14 +110,13 @@ def register(app, llm) -> None:
         )
 
         if not request.stream:
-            raw = "".join(stream)
-            reasoning, answer = split_response(raw)
+            reasoning, answer = separate("".join(stream))
 
             return {
                 "id": request_id,
                 "object": "chat.completion",
                 "created": int(time.time()),
-                "model": config.MODEL_ID,
+                "model": config.model_id(),
                 "choices": [
                     {
                         "index": 0,
@@ -152,7 +148,7 @@ def register(app, llm) -> None:
                         )
 
                 if strip_reasoning:
-                    _, answer = split_response(buffer)
+                    _, answer = separate(buffer)
                     yield _sse(
                         _chunk(request_id, {"role": "assistant", "content": answer})
                     )

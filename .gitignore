@@ -20,8 +20,9 @@ env/
 # Notebook scratch output
 .ipynb_checkpoints/
 
-# The original prototype notebook. Superseded by notebook/qwen-k.ipynb plus the
-# qwenk/ package; kept on disk for reference, not published. Safe to delete.
+# The original prototype notebook. Superseded by notebook/gguf-serve.ipynb plus
+# the ggufserve/ package; kept on disk for reference, not published.
+# Safe to delete.
 notebook/qwen38-api.ipynb
 
 # Editors and OS

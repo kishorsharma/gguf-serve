@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen-K entry point: install, download, load, serve.
+"""gguf-serve entry point: install, download, load, serve.
 
     python launch.py
 
@@ -16,56 +16,92 @@ from pathlib import Path
 # Allow `python launch.py` from any working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from qwenk import config
-from qwenk.version import version
+from ggufserve import config
+from ggufserve.version import version
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="launch.py",
-        description="Serve Qwen3.8-27B with an OpenAI-compatible public API.",
+        description=(
+            "Serve a GGUF model with an OpenAI-compatible public API. "
+            "Defaults to Qwen3.8-27B on two 16 GB GPUs."
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=config.SERVER_PORT,
-        help="port to listen on; the next free port is used if it is taken",
+    model = parser.add_argument_group("model")
+    model.add_argument(
+        "--model-file",
+        default=config.MODEL_FILE,
+        help="the .gguf filename to serve",
     )
-    parser.add_argument(
-        "--no-share",
-        action="store_true",
-        help="do not create a public gradio.live URL (local access only)",
+    model.add_argument(
+        "--model-repo",
+        default=config.MODEL_REPO,
+        help="Hugging Face repo holding that file",
     )
-    parser.add_argument(
+    model.add_argument(
+        "--model-url",
+        default=config.MODEL_URL,
+        help="download from this URL instead of Hugging Face",
+    )
+    model.add_argument(
         "--model-dir",
         type=Path,
         default=config.MODEL_DIR,
-        help="directory holding the .gguf file",
+        help="directory the .gguf is stored in",
     )
-    parser.add_argument(
+    model.add_argument(
         "--ctx",
         type=int,
         default=config.CTX_SIZE,
         help="context window in tokens; lower it if the model will not fit",
     )
-    parser.add_argument(
+    model.add_argument(
+        "--gpu-layers",
+        type=int,
+        default=config.N_GPU_LAYERS,
+        help="layers to offload to the GPU; -1 means all of them",
+    )
+
+    server = parser.add_argument_group("server")
+    server.add_argument(
+        "--port",
+        type=int,
+        default=config.SERVER_PORT,
+        help="port to listen on; the next free port is used if it is taken",
+    )
+    server.add_argument(
+        "--no-share",
+        action="store_true",
+        help="do not create a public gradio.live URL (local access only)",
+    )
+
+    behaviour = parser.add_argument_group("behaviour")
+    behaviour.add_argument(
+        "--no-reasoning",
+        action="store_true",
+        help="pass model output through untouched instead of splitting off "
+        "any </think> reasoning section",
+    )
+    behaviour.add_argument(
         "--skip-install",
         action="store_true",
         help="assume dependencies are already correct",
     )
-    parser.add_argument(
+    behaviour.add_argument(
         "--skip-smoke-test",
         action="store_true",
         help="start serving without first checking that the model generates",
     )
-    parser.add_argument(
+    behaviour.add_argument(
         "--download-only",
         action="store_true",
         help="fetch and validate the model, then exit without loading it",
     )
-    parser.add_argument("--version", action="version", version=f"Qwen-K {version}")
+
+    parser.add_argument("--version", action="version", version=f"gguf-serve {version}")
 
     return parser.parse_args(argv)
 
@@ -73,13 +109,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    # Applied before anything reads them.
+    # Applied before any other module reads them.
+    config.MODEL_FILE = args.model_file
+    config.MODEL_REPO = args.model_repo
+    config.MODEL_URL = args.model_url
     config.MODEL_DIR = args.model_dir
     config.CTX_SIZE = args.ctx
+    config.N_GPU_LAYERS = args.gpu_layers
+    if args.no_reasoning:
+        config.PARSE_REASONING = False
 
-    from qwenk import chat, installer, model, server, system
+    from ggufserve import chat, installer, model, server, system
 
-    system.banner(f"  Qwen-K {version}  —  {config.MODEL_FILE}")
+    system.banner(f"  gguf-serve {version}  —  {config.model_id()}")
 
     system.report(config.MODEL_DIR)
 

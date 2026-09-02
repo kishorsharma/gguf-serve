@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Route tests that run without a GPU, using a stub in place of the model.
+"""Tests that run without a GPU, using a stub in place of the model.
 
 These cover the behaviour the notebook was verified against: reasoning stripped
 from non-streaming responses, raw text preserved in streams, sampling parameters
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -24,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from qwenk import api, webui
-from qwenk.chat import split_response
+from ggufserve import api, chat, config, model, webui
+from ggufserve.chat import split_response
 
 REASONING = "Let me think. 17*23 = 391."
 ANSWER = "17 x 23 = **391**."
@@ -62,6 +63,18 @@ class StubLlama:
         return chunks()
 
 
+def _with_config(fn, **overrides):
+    """Call `fn` with config values temporarily replaced, then restore them."""
+    previous = {key: getattr(config, key) for key in overrides}
+    try:
+        for key, value in overrides.items():
+            setattr(config, key, value)
+        return fn()
+    finally:
+        for key, value in previous.items():
+            setattr(config, key, value)
+
+
 def build_app(llm) -> FastAPI:
     app = FastAPI()
 
@@ -96,10 +109,40 @@ def main() -> int:
     client = TestClient(build_app(llm))
     check = Checker()
 
+    check.section("model identity")
+    check(
+        "id derived from a GGUF filename",
+        config.derive_model_id("Qwen3.8-27B-UD-Q5_K_XL.gguf") == "qwen3.8-27b-ud-q5-k-xl",
+        config.derive_model_id("Qwen3.8-27B-UD-Q5_K_XL.gguf"),
+    )
+    check(
+        "works for an unrelated model",
+        config.derive_model_id("DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf")
+        == "deepseek-r1-distill-qwen-7b-q4-k-m",
+        config.derive_model_id("DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf"),
+    )
+    check(
+        "an explicit MODEL_ID wins",
+        _with_config(MODEL_ID="custom-name", fn=config.model_id) == "custom-name",
+    )
+    check(
+        "MODEL_URL overrides the Hugging Face URL",
+        _with_config(MODEL_URL="https://example.com/m.gguf", fn=config.model_url)
+        == "https://example.com/m.gguf",
+    )
+
     check.section("status routes")
     response = client.get("/health")
     check("/health returns 200", response.status_code == 200, response.text)
-    check("/health names the model", "model" in response.json(), response.text)
+    check(
+        "/health names the loaded model",
+        response.json()["model"] == config.model_id(),
+        response.text,
+    )
+    check(
+        "/v1/models advertises the same id",
+        client.get("/v1/models").json()["data"][0]["id"] == config.model_id(),
+    )
     check(
         "/v1/models lists exactly one model",
         len(client.get("/v1/models").json()["data"]) == 1,
@@ -108,9 +151,12 @@ def main() -> int:
     check.section("web ui")
     check(
         "/ serves the UI rather than gradio's root",
-        "<title>Qwen-K</title>" in client.get("/").text,
+        "<title>gguf-serve</title>" in client.get("/").text,
     )
-    check("/chat serves the UI", "<title>Qwen-K</title>" in client.get("/chat").text)
+    check(
+        "/chat serves the UI",
+        "<title>gguf-serve</title>" in client.get("/chat").text,
+    )
     check(
         "stylesheet has the right content type",
         client.get("/assets/style.css").headers["content-type"].startswith("text/css"),
@@ -205,6 +251,50 @@ def main() -> int:
 
     _, answer = split_response(streamed)
     check("a client can recover the answer", answer == ANSWER, repr(answer))
+
+    check.section("reasoning parsing")
+    check(
+        "reasoning split off when enabled",
+        chat.separate(RAW) == (REASONING, ANSWER),
+        repr(chat.separate(RAW)),
+    )
+    check(
+        "output passed through untouched when disabled",
+        _with_config(lambda: chat.separate(RAW), PARSE_REASONING=False)
+        == ("", RAW.strip()),
+    )
+    check(
+        "a model with no reasoning tags is unaffected",
+        chat.separate("Just an answer.") == ("", "Just an answer."),
+    )
+
+    check.section("model file validation")
+    with tempfile.TemporaryDirectory() as tmp:
+        good = Path(tmp) / "good.gguf"
+        good.write_bytes(b"GGUF" + b"\0" * 1020)
+
+        check("a well-formed file passes", model.validate(good)[0])
+        check(
+            "exact expected size passes",
+            model.validate(good, expected_bytes=1024)[0],
+        )
+        check(
+            "a short file is rejected as incomplete",
+            model.validate(good, expected_bytes=999_999)[0] is False,
+        )
+
+        wrong = Path(tmp) / "wrong.gguf"
+        wrong.write_bytes(b"NOPE" + b"\0" * 1020)
+        check("bad magic bytes are rejected", model.validate(wrong)[0] is False)
+
+        empty = Path(tmp) / "empty.gguf"
+        empty.write_bytes(b"")
+        check("an empty file is rejected", model.validate(empty)[0] is False)
+
+        check(
+            "a missing file is rejected",
+            model.validate(Path(tmp) / "nope.gguf")[0] is False,
+        )
 
     check.section("inference lock")
 

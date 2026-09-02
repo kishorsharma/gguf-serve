@@ -1,20 +1,20 @@
-# Qwen-K
+# gguf-serve
 
-[![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/kishorsharma/qwen-k/blob/main/notebook/qwen-k.ipynb)
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kishorsharma/qwen-k/blob/main/notebook/qwen-k.ipynb)
+[![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/kishorsharma/gguf-serve/blob/main/notebook/gguf-serve.ipynb)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kishorsharma/gguf-serve/blob/main/notebook/gguf-serve.ipynb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Run **Qwen3.8-27B** on a free Kaggle notebook and get a **public, OpenAI-compatible API** plus a browser chat UI — from one command.
-
-Qwen-K handles the parts that are normally fiddly: picking a CUDA build of llama.cpp that actually uses the GPU, fetching the 19.4 GiB GGUF without stalling, splitting a 27B model across two 16 GB T4s, and exposing everything through a single public URL instead of two tunnels.
+Turn any GGUF model into a **public, OpenAI-compatible API** with a browser chat UI — from one command, on a free notebook GPU.
 
 ```
-git clone https://github.com/kishorsharma/qwen-k.git
-cd qwen-k
+git clone https://github.com/kishorsharma/gguf-serve.git
+cd gguf-serve
 python launch.py
 ```
 
-That is the whole setup. The first run installs dependencies, downloads the model, loads it, and starts serving — about 15 minutes, mostly download. Re-running skips whatever is already done.
+That is the whole setup. It installs a CUDA build of llama.cpp that actually uses the GPU, downloads and verifies the model, splits it across however many GPUs you have, and serves everything on one public URL. Re-running skips whatever is already done.
+
+Anything [llama.cpp](https://github.com/ggerganov/llama.cpp) can load works — Qwen, Llama, Mistral, Gemma, DeepSeek-R1, Phi. The only real constraint is that the model plus its KV cache fits your VRAM. The default is Qwen3.8-27B at Q5\_K\_XL, verified on Kaggle's free 2 × Tesla T4.
 
 ## What you get
 
@@ -22,32 +22,48 @@ One server, one origin, six endpoints:
 
 | Path | What it is |
 | --- | --- |
-| `/` | Browser chat UI with live reasoning and streaming |
+| `/` | Browser chat UI with streaming and live reasoning |
 | `/docs` | Interactive OpenAPI reference |
 | `/v1/models` | OpenAI model listing |
 | `/v1/chat/completions` | OpenAI chat completions, streaming and non-streaming |
-| `/health` | Health and configuration check |
+| `/health` | Health check reporting what is actually loaded |
 | `/openapi.json` | OpenAPI schema |
 
-With `--share` (the default) all of them are also reachable on a public `https://….gradio.live` URL, so you can point a client on your laptop at a model running in a Kaggle notebook.
+All of them are also reachable on a public `https://….gradio.live` URL, so a client on your laptop can talk to a model running in a notebook.
+
+## Serving a different model
+
+Two flags, no editing:
+
+```
+python launch.py \
+  --model-repo unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF \
+  --model-file DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf
+```
+
+Everything else follows. The API model id is derived from the filename (`deepseek-r1-distill-qwen-7b-q4-k-m`), the download size is read from the server so nothing needs to be looked up, and the chat UI labels itself from `/health`.
+
+For a permanent change, edit [`ggufserve/config.py`](ggufserve/config.py) instead. Single-GPU setups and mismatched GPU pairs are covered in [docs/configuration.md](docs/configuration.md).
 
 ## Running it
 
 ### Kaggle
 
-Open [`notebook/qwen-k.ipynb`](notebook/qwen-k.ipynb) and run its two cells. Set the accelerator to **GPU T4 x2** first (*Settings → Accelerator*) — the default quantization needs about 23 GiB of VRAM, which is two T4s.
+Open [`notebook/gguf-serve.ipynb`](notebook/gguf-serve.ipynb) and run its two cells. Set the accelerator to **GPU T4 x2** first (*Settings → Accelerator*) — the default model needs about 23 GiB of VRAM, which is two T4s.
 
 Leave the second cell running. The server lives inside it, so stopping the cell takes the public URL down with it.
 
 ### Colab
 
-The same notebook works, with one caveat: **free Colab gives you a single 16 GB T4**, and the default quantization does not fit. Either use a runtime with more VRAM (L4 or A100), or switch to a smaller quantization first — set `MODEL_FILE` to `Qwen3.8-27B-UD-Q3_K_XL.gguf` and `TENSOR_SPLIT` to `None` in `qwenk/config.py`. [docs/configuration.md](docs/configuration.md) covers both.
+The same notebook works, with one caveat: **free Colab gives you a single 16 GB T4**, and the default model does not fit. Either use an L4 or A100 runtime, or pick a model that fits one card:
+
+```
+python launch.py --model-file Qwen3.8-27B-UD-Q3_K_XL.gguf
+```
 
 ### Your own machine
 
 ```
-git clone https://github.com/kishorsharma/qwen-k.git
-cd qwen-k
 python launch.py --no-share
 ```
 
@@ -57,13 +73,18 @@ python launch.py --no-share
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--port` | `7860` | Port to listen on; falls forward to the next free port if taken |
+| `--model-file` | `Qwen3.8-27B-UD-Q5_K_XL.gguf` | The `.gguf` to serve |
+| `--model-repo` | `unsloth/Qwen3.8-27B-GGUF` | Hugging Face repo holding it |
+| `--model-url` | — | Download from here instead of Hugging Face |
+| `--model-dir` | `/tmp/gguf-serve/models` | Where the `.gguf` is stored |
+| `--ctx` | `16384` | Context window; lower it if the model will not fit |
+| `--gpu-layers` | `-1` | Layers on the GPU; `-1` means all |
+| `--port` | `7860` | Falls forward to the next free port if taken |
 | `--no-share` | off | Local access only, no public URL |
-| `--model-dir` | `/tmp/qwen-k/models` | Where the `.gguf` lives |
-| `--ctx` | `16384` | Context window; lower this if the model will not fit |
-| `--skip-install` | off | Trust the current environment and skip dependency checks |
-| `--skip-smoke-test` | off | Start serving without first checking that the model generates |
-| `--download-only` | off | Fetch and validate the model, then exit |
+| `--no-reasoning` | off | Pass output through without splitting off `</think>` |
+| `--skip-install` | off | Trust the environment, skip dependency checks |
+| `--skip-smoke-test` | off | Serve without checking that the model generates |
+| `--download-only` | off | Fetch and verify the model, then exit |
 
 ## Using the API
 
@@ -78,55 +99,50 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="qwen3.8-27b-q5-k-xl",
+    model="qwen3.8-27b-ud-q5-k-xl",
     messages=[{"role": "user", "content": "Explain tensor parallelism briefly."}],
 )
 
 print(response.choices[0].message.content)
 ```
 
-Qwen3.8 is a reasoning model, so responses contain a `</think>`-delimited reasoning section. Non-streaming responses have it stripped for you; streaming responses do not, by default. See [docs/api.md](docs/api.md) for how that works and how to change it.
+`GET /health` tells you the exact model id to use if you are unsure.
+
+Reasoning models wrap their scratchpad in `</think>` tags. Non-streaming responses have it stripped for you; streaming responses do not, by default. [docs/api.md](docs/api.md) explains why and how to change it. Ordinary models never emit the tag, so nothing special happens for them.
 
 ## Requirements
 
 | | Minimum | Notes |
 | --- | --- | --- |
-| GPU | 2 x 16 GB NVIDIA | Verified on Kaggle 2 x Tesla T4. One 16 GB GPU is not enough for the default quantization. |
-| VRAM | ~23 GiB total | Weights plus a 16K KV cache |
+| GPU | NVIDIA, CUDA 12.1+ | Verified on Kaggle 2 × Tesla T4 (CUDA 12.8) |
+| VRAM | model size + ~3 GiB | The `+3` is the 16K KV cache; scales with `--ctx` |
 | System RAM | 16 GB | 32 GB on Kaggle |
-| Disk | 21 GiB free | For the model file |
+| Disk | model size + 5% | Checked before downloading |
 | Python | 3.10+ | 3.12 on Kaggle |
-| CUDA | 12.1+ | 12.8 on Kaggle |
 
-Below these numbers llama.cpp spills layers to system RAM and generation slows to a crawl rather than failing outright.
-
-## Configuration
-
-Everything tunable lives in [`qwenk/config.py`](qwenk/config.py) — model file, context size, GPU split, sampling defaults, dependency pins. It is plain Python with comments explaining what each value does and when to change it.
-
-For a different quantization, persistent model storage, or single-GPU use, see [docs/configuration.md](docs/configuration.md).
+Multiple GPUs are pooled, so 2 × 16 GB serves a 19 GiB model fine. Below the VRAM figure nothing fails outright — llama.cpp spills layers to system RAM and generation gets dramatically slower.
 
 ## How it is put together
 
 Each module maps to a stage of the launch sequence, in the order `launch.py` runs them:
 
 ```
-launch.py            entry point and command-line flags
-qwenk/config.py      all tunable settings
-qwenk/system.py      host inspection, console helpers
-qwenk/installer.py   CUDA llama.cpp + Gradio setup, skipped when already correct
-qwenk/model.py       download, validate, load the GGUF
-qwenk/chat.py        generation, inference lock, reasoning-tag parsing
-qwenk/api.py         OpenAI-compatible routes
-qwenk/webui.py       routes serving the chat UI
-qwenk/server.py      assembles and launches the one public server
-web/                 chat UI (html, css, js)
-tests/               route tests that run without a GPU
+launch.py                entry point and command-line flags
+ggufserve/config.py      all tunable settings
+ggufserve/system.py      host inspection, console helpers
+ggufserve/installer.py   CUDA llama.cpp + Gradio setup, skipped when correct
+ggufserve/model.py       download, verify, load the GGUF
+ggufserve/chat.py        generation, inference lock, reasoning-tag parsing
+ggufserve/api.py         OpenAI-compatible routes
+ggufserve/webui.py       routes serving the chat UI
+ggufserve/server.py      assembles and launches the one public server
+web/                     chat UI (html, css, js)
+tests/                   tests that run without a GPU
 ```
 
 The whole thing is a single `gradio.Server`, which is a FastAPI app. Because the API routes, the chat UI, and the share tunnel all belong to that one app, they share one public origin — that is why there is no second process and no second tunnel to expose.
 
-The route tests stub out the model, so they need neither a GPU nor llama.cpp and run in a second on a laptop:
+The tests stub the model out, so they need neither a GPU nor llama.cpp and run in a second on a laptop:
 
 ```
 pip install fastapi httpx
@@ -138,18 +154,18 @@ Docs: [configuration](docs/configuration.md) · [API reference](docs/api.md) · 
 ## Limits worth knowing
 
 - **The public URL is unauthenticated.** Anyone with the link can use the model and spend your GPU quota. Treat it as temporary and share it carefully.
-- **One request at a time.** A single llama.cpp context cannot serve concurrent requests, so requests queue. This is a deliberate fit for a 2 x T4 box, not an oversight.
+- **One request at a time.** A single llama.cpp context cannot serve concurrent requests, so requests queue. This is a deliberate fit for a small GPU box, not an oversight.
 - **The share URL is temporary.** It lasts up to 72 hours and dies with the process.
-- **On Kaggle the model is re-downloaded after a restart**, because it is stored in scratch space. See [docs/configuration.md](docs/configuration.md) to avoid that.
+- **On a hosted notebook the model is re-downloaded after a restart**, because it lands in scratch space. [docs/configuration.md](docs/configuration.md) covers how to avoid that.
+- **Multi-part GGUF splits are not handled.** The model has to be one self-contained file.
 
 ## Credits
 
-- [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) by Alibaba's Qwen team
-- [GGUF quantizations](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) by [Unsloth](https://github.com/unslothai/unsloth)
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) and [llama-cpp-python](https://github.com/abetlen/llama-cpp-python)
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) and [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) for inference
 - [Gradio](https://github.com/gradio-app/gradio) for the app server and share tunnel
+- [Unsloth](https://github.com/unslothai/unsloth) for the GGUF quantizations used by default
 - Clone-and-run packaging inspired by [Fooocus](https://github.com/lllyasviel/Fooocus)
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The model weights are covered by their own license (Apache 2.0).
+MIT — see [LICENSE](LICENSE). Model weights carry their own licenses.

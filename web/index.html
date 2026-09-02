@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Qwen-K</title>
+<title>gguf-serve</title>
 <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
@@ -11,7 +11,9 @@
 <div class="app">
 
   <header>
-    <h1>Qwen3.8-27B</h1>
+    <!-- Both filled in from /health once it responds, so the UI always names
+         whatever model is actually loaded. -->
+    <h1 id="title">gguf-serve</h1>
     <div class="sub" id="subtitle">llama.cpp &middot; OpenAI-compatible API</div>
   </header>
 

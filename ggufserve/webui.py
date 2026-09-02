@@ -1,16 +1,11 @@
-"""Routes that serve the browser chat UI from `web/`.
-
-Originally cells "13 - Browser chat UI" and "14 - Root redirect". The HTML, CSS
-and JavaScript now live in `web/` as editable files instead of one long Python
-string.
-"""
+"""Routes that serve the browser chat UI from `web/`."""
 
 from __future__ import annotations
 
 from fastapi.responses import FileResponse, HTMLResponse
 
-from qwenk.config import REPO_ROOT
-from qwenk.system import ok, step
+from ggufserve.config import REPO_ROOT
+from ggufserve.system import ok, step
 
 WEB_DIR = REPO_ROOT / "web"
 

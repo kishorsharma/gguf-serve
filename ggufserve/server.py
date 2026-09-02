@@ -1,7 +1,5 @@
 """Builds and launches the single public server.
 
-Originally cells "15A - Stop existing Gradio server" and "15B - Launch".
-
 Everything is served by one `gradio.Server`, which is a FastAPI application.
 Because the OpenAI routes, the chat UI and the share tunnel all belong to that
 one app, they share a single public origin: there is no second process and no
@@ -13,8 +11,8 @@ from __future__ import annotations
 import socket
 import time
 
-from qwenk import api, config, installer, webui
-from qwenk.system import ok, step, warn
+from ggufserve import api, config, installer, webui
+from ggufserve.system import ok, step, warn
 
 
 def _port_is_free(port: int, host: str = "127.0.0.1") -> bool:
@@ -48,18 +46,18 @@ def build(llm):
     except AttributeError as error:
         raise SystemExit(
             f"This Gradio ({gradio.__version__}) has no `Server` class. "
-            f"Qwen-K needs gradio {config.GRADIO_VERSION}, which is what puts "
-            "the OpenAI routes and the share tunnel on one origin.\n"
+            f"gguf-serve needs gradio {config.GRADIO_VERSION}, which is what "
+            "puts the OpenAI routes and the share tunnel on one origin.\n"
             "Run `python launch.py` without --skip-install to fix this."
         ) from error
 
     app = Server(
-        title="Qwen-K",
+        title=config.model_id(),
         summary=f"{config.MODEL_FILE} served through llama.cpp",
         description=(
-            "OpenAI-compatible inference API for Qwen3.8-27B.\n\n"
+            "OpenAI-compatible inference API.\n\n"
             "Point any OpenAI client at `<this origin>/v1` and use the model id "
-            f"`{config.MODEL_ID}`."
+            f"`{config.model_id()}`."
         ),
         version="1.0.0",
     )
@@ -98,12 +96,12 @@ def _print_endpoints(port: int, share: bool) -> None:
 
     print()
     print("=" * 70)
-    print("  Qwen-K is running")
+    print("  gguf-serve is running")
     print("=" * 70)
     print(f"  chat UI    {local}/")
     print(f"  API docs   {local}/docs")
     print(f"  base URL   {local}/v1")
-    print(f"  model id   {config.MODEL_ID}")
+    print(f"  model id   {config.model_id()}")
     if share:
         print()
         print("  The public https://....gradio.live URL is printed above.")
