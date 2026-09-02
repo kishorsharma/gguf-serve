@@ -51,7 +51,7 @@ Multi-part splits (`…-00001-of-00002.gguf`) are **not** supported; the model h
 
 ### Picking a size that fits
 
-Budget roughly **model file size + 3 GiB** of VRAM at the default 16K context. Multiple GPUs are pooled, so 2 × 16 GB gives you a ~29.8 GiB budget.
+Budget roughly **model file size + 2 GiB** of VRAM at the default 16K context. Multiple GPUs are pooled, so 2 × 16 GB gives you a ~29.1 GiB budget — less than the 30.0 GiB the cards advertise, because CUDA does not get all of each one.
 
 For the default Qwen3.8-27B repo:
 
@@ -113,29 +113,33 @@ Every model has a hard ceiling built into its weights. For Qwen3.8-27B that is *
 
 ### Quick reference for Qwen3.8-27B on 2 × 16 GB
 
-The KV cache is allocated for the whole context up front, and its size is what decides whether a context length fits. For this model it costs **64 KiB per token** at `f16`, or **32 KiB per token** at `q8_0`.
+The KV cache is allocated for the whole context up front, and its size is what decides whether a context length fits. This model is cheaper per token than its size suggests, because it is a hybrid: its header declares `full_attention_interval = 4`, so only 16 of its 64 layers keep a growing cache and the other 48 are SSM layers holding a fixed-size state. Those 16 layers store 4 KV heads of 256 keys plus 256 values per token, which works out to **64 KiB per token** at `f16` and **34 KiB per token** at `q8_0` (`q8_0` packs 32 values into 34 bytes, so it is 8.5 bits each rather than 8).
 
-Totals below include the Q5\_K\_XL weights and about 1 GiB of buffers. Usable VRAM on 2 × T4 is roughly 29.1 GiB, since the driver reserves a little of each card.
+Totals below add the Q5\_K\_XL weights and the ~1.3 GiB of CUDA contexts and compute buffers measured at load. Usable VRAM on 2 × T4 is **29.1 GiB**: each card reports 15.0 GiB but offers only 14.56 GiB to CUDA.
 
 | `--ctx` | Tokens | KV f16 | Total f16 | KV q8_0 | Total q8_0 | On 2 × T4 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `8192` | 8K | 0.5 GiB | 21.0 GiB | 0.2 GiB | 20.7 GiB | comfortable |
-| `16384` | 16K | 1.0 GiB | 21.5 GiB | 0.5 GiB | 21.0 GiB | **default**, comfortable |
-| `32768` | 32K | 2.0 GiB | 22.5 GiB | 1.0 GiB | 21.5 GiB | comfortable |
-| `65536` | 64K | 4.0 GiB | 24.5 GiB | 2.0 GiB | 22.5 GiB | comfortable |
-| `131072` | 128K | 8.0 GiB | 28.5 GiB | 4.0 GiB | 24.5 GiB | tight at f16; fine at q8\_0 |
-| `262144` | 256K | 16.0 GiB | 36.5 GiB | 8.0 GiB | 28.5 GiB | q8\_0 only, and tight |
+| `8192` | 8K | 0.50 GiB | 21.2 GiB | 0.27 GiB | 21.0 GiB | comfortable |
+| `16384` | 16K | 1.00 GiB | 21.7 GiB | 0.53 GiB | 21.3 GiB | **default**, comfortable |
+| `32768` | 32K | 2.00 GiB | 22.7 GiB | 1.06 GiB | 21.8 GiB | comfortable |
+| `65536` | 64K | 4.00 GiB | 24.7 GiB | 2.12 GiB | 22.9 GiB | comfortable |
+| `131072` | 128K | 8.00 GiB | 28.7 GiB | 4.25 GiB | 25.0 GiB | **q8\_0 verified**; `f16` does not fit |
+| `262144` | 256K | 16.00 GiB | 36.7 GiB | 8.50 GiB | 29.2 GiB | needs smaller weights either way |
 
-So the practical picks are **64K comfortably**, **128K with `--kv-cache-type q8_0`**, and the model's full **256K only by also dropping to a smaller quantization**:
+Two caveats to reading that table. The totals are a pool, but `split_mode` divides the model by layer, so each GPU has its own ceiling and the halves are not equal — the verified 128K run lands at 11.9 GiB on one card and 13.1 GiB on the other, meaning 1.4 GiB of real headroom rather than the 4.1 GiB the total implies. And a total merely *below* 29.1 GiB is not sufficient: 256K at `q8_0` needs 29.2 GiB and fails while allocating compute buffers, reporting `sched_reserve: compute buffer allocation failed` rather than a plain out-of-memory error.
+
+So the practical picks are **64K at either precision**, **128K with `--kv-cache-type q8_0`**, and the model's full **256K only by also dropping to a smaller quantization**:
 
 ```
-# 128K, comfortable
+# 128K, verified: 25.0 GiB of 29.1 GiB
 python launch.py --ctx 131072 --kv-cache-type q8_0
 
 # 256K, the model's maximum — needs the smaller weights to leave room
 python launch.py --ctx 262144 --kv-cache-type q8_0 \
-                --model-file Qwen3.8-27B-UD-Q4_K_XL.gguf
+                --model-file Qwen3.8-27B-UD-Q5_K_S.gguf
 ```
+
+For coding specifically, prefer the larger quantization over the longer context. Quantization error is paid on every token generated, while context beyond what you actually use buys nothing — and 128K is already on the order of 10,000 lines of source.
 
 The startup summary prints actual VRAM use per GPU, which is the real check — a number well below capacity means llama.cpp spilled layers to system RAM and you should reduce the context.
 

@@ -13,7 +13,16 @@ import time
 from pathlib import Path
 
 from ggufserve import api, config, installer, webui
-from ggufserve.system import gpu_stats, human_size, ok, ram_stats, step, warn
+from ggufserve.system import (
+    gpu_stats,
+    heartbeat,
+    human_size,
+    info,
+    ok,
+    ram_stats,
+    step,
+    warn,
+)
 
 
 def _port_is_free(port: int, host: str = "127.0.0.1") -> bool:
@@ -73,15 +82,20 @@ def build(llm):
 def launch(app, port: int, share: bool, model_path: Path | None = None) -> None:
     """Start serving, print a summary, and block until interrupted."""
     step("Starting server")
+    if share:
+        # The first share on a fresh runtime downloads the frpc tunnel binary,
+        # so this step is not instant and says nothing while it works.
+        info("opening the public tunnel (this takes a few seconds)")
 
-    result = app.launch(
-        server_name=config.SERVER_NAME,
-        server_port=port,
-        share=share,
-        show_error=True,
-        # Return control so we can print our own summary and own the wait loop.
-        prevent_thread_lock=True,
-    )
+    with heartbeat("waiting for the server to come up", interval=10.0):
+        result = app.launch(
+            server_name=config.SERVER_NAME,
+            server_port=port,
+            share=share,
+            show_error=True,
+            # Return control so we can print our own summary and own the wait loop.
+            prevent_thread_lock=True,
+        )
 
     print_summary(port=port, share_url=_share_url(result), model_path=model_path)
 
@@ -115,59 +129,72 @@ def print_summary(
     share_url: str | None = None,
     model_path: Path | None = None,
 ) -> None:
-    """The everything-you-need block printed once the server is up."""
+    """The everything-you-need block printed once the server is up.
+
+    Emitted as one flushed write rather than forty prints. Nothing reads this on
+    a terminal: stdout is a pipe to the notebook, so Python block-buffers it and
+    an unflushed summary sits invisible in that buffer while the server runs
+    normally — indistinguishable from a hang at the last step.
+    """
     local_url = f"http://127.0.0.1:{port}"
     public = share_url or local_url
 
     line = "=" * 70
-    print(f"\n{line}\n  gguf-serve is running\n{line}\n")
+    out = ["", line, "  gguf-serve is running", line, ""]
 
     if share_url:
         # Front and centre, on its own line, so it can be copied in one go.
-        print(f"  PUBLIC URL   {share_url}")
+        out.append(f"  PUBLIC URL   {share_url}")
     else:
-        print(f"  LOCAL URL    {local_url}")
-        print("               (no public URL: sharing is disabled)")
+        out.append(f"  LOCAL URL    {local_url}")
+        out.append("               (no public URL: sharing is disabled)")
 
-    print()
-    print(f"  chat UI      {public}/")
-    print(f"  API base     {public}/v1")
-    print(f"  API docs     {public}/docs")
+    out += [
+        "",
+        f"  chat UI      {public}/",
+        f"  API base     {public}/v1",
+        f"  API docs     {public}/docs",
+    ]
     if share_url:
-        print(f"  local        {local_url}/")
-
-    print()
-    print(f"  model        {config.model_id()}")
+        out.append(f"  local        {local_url}/")
 
     size = ""
     if model_path is not None and model_path.exists():
         size = f"  ({human_size(model_path.stat().st_size)})"
-    print(f"  file         {config.MODEL_FILE}{size}")
-    print(f"  context      {config.CTX_SIZE:,} tokens (KV cache {config.KV_CACHE_TYPE})")
-    print(
+
+    out += [
+        "",
+        f"  model        {config.model_id()}",
+        f"  file         {config.MODEL_FILE}{size}",
+        f"  context      {config.CTX_SIZE:,} tokens (KV cache {config.KV_CACHE_TYPE})",
         "  reasoning    "
-        + ("</think> sections split off" if config.PARSE_REASONING else "not parsed")
-    )
+        + ("</think> sections split off" if config.PARSE_REASONING else "not parsed"),
+    ]
 
-    print()
-    for gpu in gpu_stats():
-        print(f"  GPU {gpu.index}        {gpu.describe()}")
-
+    # Kept together so the blank line above them disappears with them, on a host
+    # that reports neither.
+    stats = [f"  GPU {gpu.index}        {gpu.describe()}" for gpu in gpu_stats()]
     ram = ram_stats()
     if ram:
         used, total = ram
-        print(f"  RAM          {used:.1f} / {total:.1f} GiB ({used / total * 100:.0f}%)")
+        stats.append(f"  RAM          {used:.1f} / {total:.1f} GiB ({used / total * 100:.0f}%)")
+    if stats:
+        out += [""] + stats
 
-    print()
-    print("  Point any OpenAI client at:")
-    print(f'    base_url = "{public}/v1"')
-    print(f'    model    = "{config.model_id()}"')
-    print('    api_key  = "not-used"')
+    out += [
+        "",
+        "  Point any OpenAI client at:",
+        f'    base_url = "{public}/v1"',
+        f'    model    = "{config.model_id()}"',
+        '    api_key  = "not-used"',
+    ]
 
     if share_url:
-        print()
-        print("  Anyone with the public URL can use this model. The link lasts")
-        print("  only while this process runs (at most a week).")
+        out += [
+            "",
+            "  Anyone with the public URL can use this model. The link lasts",
+            "  only while this process runs (at most a week).",
+        ]
 
-    print(line)
-    print("\nPress Ctrl+C (or stop the notebook cell) to shut down.\n")
+    out += [line, "", "Press Ctrl+C (or stop the notebook cell) to shut down.", ""]
+    print("\n".join(out), flush=True)

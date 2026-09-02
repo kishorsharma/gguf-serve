@@ -20,6 +20,7 @@ from ggufserve.system import (
     gpu_count,
     gpu_stats,
     heartbeat,
+    human_size,
     info,
     ok,
     step,
@@ -124,7 +125,7 @@ def acquire() -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     info("downloading; this takes a few minutes on a fast connection")
-    _download(url, path)
+    _download(url, path, expected)
 
     valid, detail = validate(path, expected)
     if not valid:
@@ -134,7 +135,22 @@ def acquire() -> Path:
     return path
 
 
-def _download(url: str, dest: Path) -> None:
+def _report_download(proc, part: Path, expected: int | None, interval: float = 15.0) -> None:
+    """Print how far a running download has got, then wait for it."""
+    while True:
+        try:
+            proc.wait(timeout=interval)
+            return
+        except subprocess.TimeoutExpired:
+            done = part.stat().st_size if part.exists() else 0
+            if expected:
+                info(f"{human_size(done)} of {human_size(expected)} "
+                     f"({done / expected * 100:.0f}%)")
+            else:
+                info(human_size(done))
+
+
+def _download(url: str, dest: Path, expected: int | None = None) -> None:
     """Fetch `url` to `dest`, resuming a partial transfer if one exists.
 
     Downloads to a `.part` sibling and renames on success, so an interrupted run
@@ -148,7 +164,10 @@ def _download(url: str, dest: Path) -> None:
 
     part = dest.parent / (dest.name + ".part")
 
-    subprocess.run(
+    # curl's own progress bar redraws itself with carriage returns, which a
+    # notebook renders as one accumulating line of garbage rather than a bar.
+    # Reporting from the growing .part file gives clean, log-shaped output.
+    proc = subprocess.Popen(
         [
             "curl",
             "--location",
@@ -156,14 +175,53 @@ def _download(url: str, dest: Path) -> None:
             "--retry", "5",
             "--retry-delay", "3",
             "--continue-at", "-",
-            "--progress-bar",
+            "--no-progress-meter",
             "--output", str(part),
             url,
-        ],
-        check=True,
+        ]
     )
 
+    try:
+        _report_download(proc, part, expected)
+    except KeyboardInterrupt:
+        proc.terminate()
+        raise
+
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"curl exited with code {proc.returncode}. The partial download is "
+            f"kept at {part}, so re-running resumes rather than starting over."
+        )
+
     os.replace(part, dest)
+
+
+def load_failure_hint(detail: str) -> str:
+    """Explain a failed load in terms of the setting that causes it.
+
+    Worth spelling out because the cause is nearly always VRAM, which llama.cpp
+    reports in a log suppressed unless VERBOSE is on — so by default the load
+    dies saying only that it failed. The settings themselves are not repeated
+    here; this step already printed them.
+    """
+    if config.KV_CACHE_TYPE == "f16":
+        remedy = 'set KV_CACHE = "q8_0", which halves it'
+    else:
+        remedy = f"lower CTX below {config.CTX_SIZE:,}"
+
+    return "\n".join(
+        [
+            "",
+            "  [x] the model could not be loaded",
+            f"  llama.cpp said: {detail}",
+            "",
+            "  The KV cache is allocated for the whole context up front, so this",
+            f"  is nearly always VRAM. To fit, {remedy}.",
+            "  docs/configuration.md lists what each context length costs.",
+            "  Set VERBOSE = True to see llama.cpp's own error.",
+            "",
+        ]
+    )
 
 
 def load(path: Path):
@@ -213,21 +271,25 @@ def load(path: Path):
 
     # llama.cpp is silent while it reads the weights, so without a heartbeat
     # this looks identical to a hang for several minutes.
-    with heartbeat("loading weights onto the GPU"):
-        llm = Llama(
-            model_path=str(path),
-            n_gpu_layers=config.N_GPU_LAYERS,
-            split_mode=1,  # split by layer across GPUs
-            tensor_split=tensor_split,
-            n_ctx=config.CTX_SIZE,
-            n_batch=config.N_BATCH,
-            n_ubatch=config.N_UBATCH,
-            offload_kqv=config.OFFLOAD_KQV,
-            n_threads=threads,
-            n_threads_batch=threads,
-            verbose=False,
-            **extra,
-        )
+    try:
+        with heartbeat("loading weights onto the GPU"):
+            llm = Llama(
+                model_path=str(path),
+                n_gpu_layers=config.N_GPU_LAYERS,
+                split_mode=1,  # split by layer across GPUs
+                tensor_split=tensor_split,
+                n_ctx=config.CTX_SIZE,
+                n_batch=config.N_BATCH,
+                n_ubatch=config.N_UBATCH,
+                offload_kqv=config.OFFLOAD_KQV,
+                n_threads=threads,
+                n_threads_batch=threads,
+                verbose=config.VERBOSE,
+                **extra,
+            )
+    except Exception as error:
+        print(load_failure_hint(str(error) or type(error).__name__), flush=True)
+        raise SystemExit(1)
 
     ok("model loaded")
 

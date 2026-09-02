@@ -66,6 +66,11 @@ TENSOR_SPLIT: list[float] | None = [1.0, 1.0]
 # Keep the KV cache on the GPU.
 OFFLOAD_KQV = True
 
+# Let llama.cpp print its own log. Off by default because a successful load
+# emits a few hundred lines, but it is the only place allocation failures are
+# reported, so turn it on when a load dies without saying why.
+VERBOSE = False
+
 # Sampling defaults, applied when a request does not override them.
 TEMPERATURE = 1.0
 TOP_P = 0.95

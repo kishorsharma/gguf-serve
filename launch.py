@@ -118,6 +118,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     behaviour = parser.add_argument_group("behaviour")
     behaviour.add_argument(
+        "--verbose",
+        action="store_true",
+        help="let llama.cpp print its own log; the only place allocation "
+        "failures are reported, so use it when a load dies without saying why",
+    )
+    behaviour.add_argument(
         "--no-reasoning",
         action="store_true",
         help="pass model output through untouched instead of splitting off "
@@ -206,6 +212,7 @@ def main(argv: list[str] | None = None) -> None:
     config.N_GPU_LAYERS = args.gpu_layers
     config.KV_CACHE_TYPE = args.kv_cache_type
     config.TENSOR_SPLIT = _parse_split(args.tensor_split)
+    config.VERBOSE = args.verbose
     if args.no_reasoning:
         config.PARSE_REASONING = False
 

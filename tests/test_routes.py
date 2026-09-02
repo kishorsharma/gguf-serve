@@ -536,6 +536,7 @@ def main() -> int:
         "PORT": config.SERVER_PORT,
         "SHARE": config.SHARE,
         "PARSE_REASONING": config.PARSE_REASONING,
+        "VERBOSE": config.VERBOSE,
     }
     check("every setting was found in the cell", set(expected) <= set(settings))
     for name, value in expected.items():
