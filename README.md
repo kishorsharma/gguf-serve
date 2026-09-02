@@ -1,5 +1,9 @@
 # Qwen-K
 
+[![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/<your-username>/qwen-k/blob/main/notebook/qwen-k.ipynb)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/<your-username>/qwen-k/blob/main/notebook/qwen-k.ipynb)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Run **Qwen3.8-27B** on a free Kaggle notebook and get a **public, OpenAI-compatible API** plus a browser chat UI — from one command.
 
 Qwen-K handles the parts that are normally fiddly: picking a CUDA build of llama.cpp that actually uses the GPU, fetching the 19.4 GiB GGUF without stalling, splitting a 27B model across two 16 GB T4s, and exposing everything through a single public URL instead of two tunnels.
@@ -29,11 +33,15 @@ With `--share` (the default) all of them are also reachable on a public `https:/
 
 ## Running it
 
-### Kaggle or Colab
+### Kaggle
 
-Open [`notebook/qwen-k.ipynb`](notebook/qwen-k.ipynb) and run its two cells. Set the accelerator to **GPU T4 x2** first — the default quantization needs about 23 GiB of VRAM, which is two T4s.
+Open [`notebook/qwen-k.ipynb`](notebook/qwen-k.ipynb) and run its two cells. Set the accelerator to **GPU T4 x2** first (*Settings → Accelerator*) — the default quantization needs about 23 GiB of VRAM, which is two T4s.
 
 Leave the second cell running. The server lives inside it, so stopping the cell takes the public URL down with it.
+
+### Colab
+
+The same notebook works, with one caveat: **free Colab gives you a single 16 GB T4**, and the default quantization does not fit. Either use a runtime with more VRAM (L4 or A100), or switch to a smaller quantization first — set `MODEL_FILE` to `Qwen3.8-27B-UD-Q3_K_XL.gguf` and `TENSOR_SPLIT` to `None` in `qwenk/config.py`. [docs/configuration.md](docs/configuration.md) covers both.
 
 ### Your own machine
 
