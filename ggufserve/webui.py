@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi.responses import FileResponse, HTMLResponse
 
 from ggufserve.config import REPO_ROOT
-from ggufserve.system import ok, step
+from ggufserve.system import ok
 
 WEB_DIR = REPO_ROOT / "web"
 
@@ -14,8 +14,6 @@ _CONTENT_TYPES = {".css": "text/css", ".js": "text/javascript"}
 
 def register(app) -> None:
     """Serve the UI at `/` and `/chat`, with its assets under `/assets`."""
-    step("Registering web UI")
-
     index = WEB_DIR / "index.html"
     if not index.exists():
         raise SystemExit(f"Web UI missing: {index}")

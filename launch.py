@@ -112,6 +112,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _count_steps(args) -> int:
+    """How many numbered steps this run will print, so `[3/8]` is honest.
+
+    Kept next to main() because it has to mirror the step() calls below; a
+    mismatch only skews the labels, it does not break the run.
+    """
+    total = 1  # host check
+    if not args.skip_install:
+        total += 2  # llama-cpp-python, Gradio
+    total += 1  # locate model
+    if not args.download_only:
+        total += 1  # load model
+        if not args.skip_smoke_test:
+            total += 1
+        total += 2  # build server, start server
+    return total
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
@@ -129,11 +147,12 @@ def main(argv: list[str] | None = None) -> None:
     from ggufserve import chat, installer, model, server, system
 
     system.banner(f"  gguf-serve {version}  —  {config.model_id()}")
+    system.set_total_steps(_count_steps(args))
 
     system.report(config.MODEL_DIR)
 
     if args.skip_install:
-        system.step("Skipping dependency check (--skip-install)")
+        system.info("skipping dependency check (--skip-install)")
     else:
         installer.setup()
 

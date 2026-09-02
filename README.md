@@ -14,6 +14,21 @@ python launch.py
 
 That is the whole setup. It installs a CUDA build of llama.cpp that actually uses the GPU, downloads and verifies the model, splits it across however many GPUs you have, and serves everything on one public URL. Re-running skips whatever is already done.
 
+The first run takes roughly 15 minutes, so it reports itself as eight numbered steps, and the two slow ones — the download and loading the weights — print a progress bar and an elapsed-time line respectively. Silence never means it is working.
+
+```
+[4/8] Locating model
+   Qwen3.8-27B-UD-Q5_K_XL.gguf
+   expected size 19.44 GiB (from the server)
+   [ok] already present (19.44 GiB)
+
+[5/8] Loading model
+   ... loading weights onto the GPU (15s elapsed)
+   ... loading weights onto the GPU (30s elapsed)
+   took 41s
+   [ok] model loaded
+```
+
 When it is ready you get everything you need in one block:
 
 ```

@@ -1,5 +1,22 @@
 # Troubleshooting
 
+## The clone asks for a GitHub username
+
+```
+Cloning into '/kaggle/working/gguf-serve'...
+Username for 'https://github.com':
+```
+
+The cell is not slow, it is waiting for input it will never use. Interrupt it.
+
+GitHub does not return "not found" for a repo an anonymous client cannot see, because a 404 would leak whether a private repo exists. It asks for credentials instead, and git dutifully blocks on the prompt. So this one message covers three different mistakes:
+
+- **the repo was never pushed.** Create it on GitHub, then `git push -u origin main`.
+- **the owner or name is wrong.** Check `REPO_URL` against the address bar on GitHub.
+- **the repo is private.** Anonymous clones cannot read it. Use a personal access token in the URL: `https://<token>@github.com/<owner>/<repo>.git`. On Kaggle, put the token in *Add-ons → Secrets* rather than typing it into a cell you might share.
+
+Cell 1 of the notebook checks the URL before it calls git, so it reports which of these it is instead of hanging. If you are cloning by hand, `GIT_TERMINAL_PROMPT=0 git clone ...` turns the hang into an error.
+
 ## "CUDA GPU offload is unavailable"
 
 `launch.py` stops here rather than continuing, because the alternative is a model that loads onto the CPU and generates a token every few seconds.

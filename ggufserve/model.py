@@ -15,7 +15,16 @@ import subprocess
 from pathlib import Path
 
 from ggufserve import config
-from ggufserve.system import free_disk_gib, gpu_count, gpu_stats, ok, step, warn
+from ggufserve.system import (
+    free_disk_gib,
+    gpu_count,
+    gpu_stats,
+    heartbeat,
+    info,
+    ok,
+    step,
+    warn,
+)
 
 GGUF_MAGIC = b"GGUF"
 
@@ -82,23 +91,23 @@ def acquire() -> Path:
     path = config.model_path()
     url = config.model_url()
 
-    print(f"   {config.MODEL_FILE}")
+    info(config.MODEL_FILE)
 
     expected = remote_size(url)
     if expected:
-        print(f"   expected size {expected / 1024**3:.2f} GiB (from the server)")
+        info(f"expected size {expected / 1024**3:.2f} GiB (from the server)")
 
     valid, detail = validate(path, expected)
     if valid:
         ok(f"already present at {path} ({detail})")
         if expected is None:
-            print("   note: could not reach the server, so size was not verified")
+            info("note: could not reach the server, so size was not verified")
         return path
 
-    print(f"   {path}: {detail}")
+    info(f"{path}: {detail}")
 
     if path.exists():
-        print("   removing the unusable file before retrying")
+        info("removing the unusable file before retrying")
         path.unlink()
 
     if expected:
@@ -114,7 +123,7 @@ def acquire() -> Path:
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    print("   downloading; this takes a few minutes on a fast connection")
+    info("downloading; this takes a few minutes on a fast connection")
     _download(url, path)
 
     valid, detail = validate(path, expected)
@@ -189,8 +198,6 @@ def load(path: Path):
         f"   context {config.CTX_SIZE:,}, gpu_layers {config.N_GPU_LAYERS}, "
         f"tensor_split {tensor_split}, kv cache {kv_type}"
     )
-    print("   this takes a few minutes")
-
     threads = max(4, os.cpu_count() or 4)
 
     extra = {}
@@ -204,20 +211,23 @@ def load(path: Path):
             "flash_attn": True,
         }
 
-    llm = Llama(
-        model_path=str(path),
-        n_gpu_layers=config.N_GPU_LAYERS,
-        split_mode=1,  # split by layer across GPUs
-        tensor_split=tensor_split,
-        n_ctx=config.CTX_SIZE,
-        n_batch=config.N_BATCH,
-        n_ubatch=config.N_UBATCH,
-        offload_kqv=config.OFFLOAD_KQV,
-        n_threads=threads,
-        n_threads_batch=threads,
-        verbose=False,
-        **extra,
-    )
+    # llama.cpp is silent while it reads the weights, so without a heartbeat
+    # this looks identical to a hang for several minutes.
+    with heartbeat("loading weights onto the GPU"):
+        llm = Llama(
+            model_path=str(path),
+            n_gpu_layers=config.N_GPU_LAYERS,
+            split_mode=1,  # split by layer across GPUs
+            tensor_split=tensor_split,
+            n_ctx=config.CTX_SIZE,
+            n_batch=config.N_BATCH,
+            n_ubatch=config.N_UBATCH,
+            offload_kqv=config.OFFLOAD_KQV,
+            n_threads=threads,
+            n_threads_batch=threads,
+            verbose=False,
+            **extra,
+        )
 
     ok("model loaded")
 

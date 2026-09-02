@@ -5,8 +5,16 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+# Step numbering, so a long run shows how far along it is. launch.py sets the
+# total up front because which steps run depends on the flags.
+_step_index = 0
+_step_total = 0
 
 
 def banner(text: str) -> None:
@@ -16,16 +24,55 @@ def banner(text: str) -> None:
     print("=" * 70)
 
 
+def set_total_steps(total: int) -> None:
+    global _step_index, _step_total
+    _step_index, _step_total = 0, total
+
+
 def step(text: str) -> None:
-    print(f"\n>> {text}")
+    global _step_index
+    _step_index += 1
+    prefix = f"[{_step_index}/{_step_total}]" if _step_total else ">>"
+    print(f"\n{prefix} {text}", flush=True)
+
+
+def info(text: str) -> None:
+    print(f"   {text}", flush=True)
 
 
 def ok(text: str) -> None:
-    print(f"   [ok] {text}")
+    print(f"   [ok] {text}", flush=True)
 
 
 def warn(text: str) -> None:
-    print(f"   [!] {text}")
+    print(f"   [!] {text}", flush=True)
+
+
+@contextmanager
+def heartbeat(label: str, interval: float = 15.0):
+    """Print an elapsed-time line while a long silent operation runs.
+
+    Loading a 19 GiB model takes minutes during which llama.cpp prints nothing,
+    which is indistinguishable from a hang. A periodic line is used rather than
+    an animated spinner because notebook output is a log, not a terminal, and
+    carriage returns there just accumulate.
+    """
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def tick() -> None:
+        while not stop.wait(interval):
+            elapsed = int(time.monotonic() - started)
+            print(f"   ... {label} ({elapsed}s elapsed)", flush=True)
+
+    thread = threading.Thread(target=tick, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1)
+        print(f"   took {time.monotonic() - started:.0f}s", flush=True)
 
 
 def run(cmd: list[str] | str, check: bool = False) -> subprocess.CompletedProcess:

@@ -6,7 +6,7 @@ import threading
 from typing import Any, Iterator
 
 from ggufserve import config
-from ggufserve.system import ok, step
+from ggufserve.system import heartbeat, info, ok, step
 
 THINK_END = "</think>"
 THINK_START = "<think>"
@@ -85,20 +85,20 @@ def smoke_test(llm) -> None:
     step("Running smoke test")
 
     prompt = "In one short sentence, what is a large language model?"
+    info(f"prompt : {prompt}")
 
-    raw = "".join(
-        generate(
-            llm,
-            [{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=192,
+    with heartbeat("generating"):
+        raw = "".join(
+            generate(
+                llm,
+                [{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=192,
+            )
         )
-    )
 
     _, answer = separate(raw)
-
-    print(f"   prompt : {prompt}")
-    print(f"   answer : {answer.replace(chr(10), ' ')[:160]}")
+    info(f"answer : {answer.replace(chr(10), ' ')[:160]}")
 
     if not answer.strip():
         raise SystemExit(

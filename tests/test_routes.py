@@ -13,7 +13,10 @@ Needs neither llama-cpp-python nor Gradio, so it is safe to run on a laptop.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import re
 import sys
 import tempfile
 import threading
@@ -21,13 +24,15 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ggufserve import api, chat, config, model, server, system, webui
 from ggufserve.chat import split_response
+from launch import _count_steps
 
 REASONING = "Let me think. 17*23 = 391."
 ANSWER = "17 x 23 = **391**."
@@ -62,6 +67,33 @@ class StubLlama:
                 self._active -= 1
 
         return chunks()
+
+
+def _captured(fn) -> str:
+    """Run `fn` and return everything it printed, including from its threads."""
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        fn()
+    return buffer.getvalue()
+
+
+def _sleep_inside_heartbeat(interval: float, duration: float) -> None:
+    with system.heartbeat("working", interval=interval):
+        time.sleep(duration)
+
+
+def _step_call_sites() -> int:
+    """Count step() calls in the package, ignoring its definition in system.py.
+
+    Ground truth for launch._count_steps: if someone adds a step() somewhere in
+    the pipeline without updating the arithmetic, this is what notices.
+    """
+    total = 0
+    for source in sorted((REPO_ROOT / "ggufserve").glob("*.py")):
+        for line in source.read_text(encoding="utf-8").splitlines():
+            if re.match(r"\s+(system\.)?step\(", line):
+                total += 1
+    return total
 
 
 def _with_config(fn, **overrides):
@@ -408,6 +440,39 @@ def main() -> int:
         llm.max_concurrent == 1,
         f"peak concurrency was {llm.max_concurrent}",
     )
+
+    check.section("progress reporting")
+    system.set_total_steps(3)
+    labels = _captured(lambda: [system.step("one"), system.step("two")])
+    check("steps are numbered against the total", "[1/3] one" in labels)
+    check("the counter advances", "[2/3] two" in labels)
+
+    system.set_total_steps(0)
+    check(
+        "an unset total falls back to a plain marker",
+        ">> solo" in _captured(lambda: system.step("solo")),
+    )
+
+    threads_before = threading.active_count()
+    ticks = _captured(lambda: _sleep_inside_heartbeat(0.05, 0.16))
+    check("a long wait reports elapsed time", "elapsed" in ticks)
+    check("the duration is printed on the way out", "took" in ticks)
+    check("the ticker thread is cleaned up", threading.active_count() == threads_before)
+
+    # The [n/total] labels are only honest while this arithmetic tracks the
+    # step() calls in the pipeline, and nothing else would catch them drifting.
+    full = SimpleNamespace(skip_install=False, download_only=False, skip_smoke_test=False)
+    check(
+        "a full run's total matches the step() calls in the package",
+        _count_steps(full) == _step_call_sites(),
+    )
+    for flag, expected in (
+        ("skip_install", _count_steps(full) - 2),
+        ("skip_smoke_test", _count_steps(full) - 1),
+        ("download_only", _count_steps(full) - 4),
+    ):
+        args = SimpleNamespace(**{**vars(full), flag: True})
+        check(f"--{flag.replace('_', '-')} shortens the total", _count_steps(args) == expected)
 
     check.section("openapi schema")
     paths = client.get("/openapi.json").json()["paths"]
