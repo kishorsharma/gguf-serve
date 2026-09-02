@@ -1,0 +1,19 @@
+# Qwen-K runtime requirements.
+#
+# `python launch.py` installs and verifies these automatically, so you normally
+# do not need to run pip yourself. Install manually only for offline setups:
+#
+#   pip install -r requirements.txt
+#
+# NOTE: llama-cpp-python is deliberately NOT listed here. The CUDA build must
+# come from the pre-built wheel index below, which pip cannot infer from a
+# plain requirements file. Installing it from PyPI gives you a CPU-only build
+# that compiles from source for 20+ minutes and never touches the GPU.
+#
+#   pip install --only-binary=:all: llama-cpp-python \
+#       --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu125
+#
+# qwenk/installer.py picks the right cuXXX index for your driver.
+
+gradio==6.26.0
+gradio_client==2.6.1

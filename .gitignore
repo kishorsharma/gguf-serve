@@ -1,0 +1,33 @@
+# Model weights — never commit these (they are 7-30 GiB each)
+models/
+*.gguf
+*.gguf.part
+
+# Local user configuration and secrets
+config.json
+auth.json
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.python-version
+
+# Notebook scratch output
+.ipynb_checkpoints/
+
+# The original prototype notebook. Superseded by notebook/qwen-k.ipynb plus the
+# qwenk/ package; kept on disk for reference, not published. Safe to delete.
+notebook/qwen38-api.ipynb
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log

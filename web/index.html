@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qwen-K</title>
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <header>
+    <h1>Qwen3.8-27B</h1>
+    <div class="sub" id="subtitle">llama.cpp &middot; OpenAI-compatible API</div>
+  </header>
+
+  <div id="chat"></div>
+
+  <div class="controls">
+    <textarea id="input" placeholder="Ask Qwen anything...  (Enter to send, Shift+Enter for a new line)"></textarea>
+
+    <div class="row">
+      <button id="send">Send</button>
+      <button id="stop" class="stop" disabled>Stop</button>
+      <button id="clear" class="secondary">Clear</button>
+
+      <label for="temp">Temperature</label>
+      <input id="temp" type="range" min="0" max="2" step="0.05" value="1">
+      <span id="tempv" class="mono">1.00</span>
+
+      <label><input id="thinking" type="checkbox"> show reasoning</label>
+
+      <span id="status" class="status">Ready</span>
+      <span class="status"><a href="/docs" target="_blank" rel="noreferrer">API docs</a></span>
+    </div>
+  </div>
+
+</div>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>
