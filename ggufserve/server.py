@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import socket
 import time
+from pathlib import Path
 
 from ggufserve import api, config, installer, webui
-from ggufserve.system import ok, step, warn
+from ggufserve.system import gpu_stats, human_size, ok, ram_stats, step, warn
 
 
 def _port_is_free(port: int, host: str = "127.0.0.1") -> bool:
@@ -69,11 +70,11 @@ def build(llm):
     return app
 
 
-def launch(app, port: int, share: bool) -> None:
-    """Start serving and block until interrupted."""
+def launch(app, port: int, share: bool, model_path: Path | None = None) -> None:
+    """Start serving, print a summary, and block until interrupted."""
     step("Starting server")
 
-    app.launch(
+    result = app.launch(
         server_name=config.SERVER_NAME,
         server_port=port,
         share=share,
@@ -82,7 +83,7 @@ def launch(app, port: int, share: bool) -> None:
         prevent_thread_lock=True,
     )
 
-    _print_endpoints(port, share)
+    print_summary(port=port, share_url=_share_url(result), model_path=model_path)
 
     try:
         while True:
@@ -91,23 +92,82 @@ def launch(app, port: int, share: bool) -> None:
         print("\nShutting down.")
 
 
-def _print_endpoints(port: int, share: bool) -> None:
-    local = f"http://127.0.0.1:{port}"
+def _share_url(launch_result) -> str | None:
+    """Pull the public URL out of whatever `Server.launch()` handed back.
+
+    Gradio returns `(app, local_url, share_url)`, with `share_url` set to None
+    when sharing is off or the tunnel failed. Read defensively: this runs after
+    a model load that can take fifteen minutes, and a shape change in Gradio
+    should cost us a nice summary, not the whole server.
+    """
+    try:
+        if isinstance(launch_result, tuple) and len(launch_result) == 3:
+            share_url = launch_result[2]
+            if isinstance(share_url, str) and share_url.startswith("http"):
+                return share_url.rstrip("/")
+    except Exception:
+        pass
+    return None
+
+
+def print_summary(
+    port: int,
+    share_url: str | None = None,
+    model_path: Path | None = None,
+) -> None:
+    """The everything-you-need block printed once the server is up."""
+    local_url = f"http://127.0.0.1:{port}"
+    public = share_url or local_url
+
+    line = "=" * 70
+    print(f"\n{line}\n  gguf-serve is running\n{line}\n")
+
+    if share_url:
+        # Front and centre, on its own line, so it can be copied in one go.
+        print(f"  PUBLIC URL   {share_url}")
+    else:
+        print(f"  LOCAL URL    {local_url}")
+        print("               (no public URL: sharing is disabled)")
 
     print()
-    print("=" * 70)
-    print("  gguf-serve is running")
-    print("=" * 70)
-    print(f"  chat UI    {local}/")
-    print(f"  API docs   {local}/docs")
-    print(f"  base URL   {local}/v1")
-    print(f"  model id   {config.model_id()}")
-    if share:
+    print(f"  chat UI      {public}/")
+    print(f"  API base     {public}/v1")
+    print(f"  API docs     {public}/docs")
+    if share_url:
+        print(f"  local        {local_url}/")
+
+    print()
+    print(f"  model        {config.model_id()}")
+
+    size = ""
+    if model_path is not None and model_path.exists():
+        size = f"  ({human_size(model_path.stat().st_size)})"
+    print(f"  file         {config.MODEL_FILE}{size}")
+    print(f"  context      {config.CTX_SIZE:,} tokens")
+    print(
+        "  reasoning    "
+        + ("</think> sections split off" if config.PARSE_REASONING else "not parsed")
+    )
+
+    print()
+    for gpu in gpu_stats():
+        print(f"  GPU {gpu.index}        {gpu.describe()}")
+
+    ram = ram_stats()
+    if ram:
+        used, total = ram
+        print(f"  RAM          {used:.1f} / {total:.1f} GiB ({used / total * 100:.0f}%)")
+
+    print()
+    print("  Point any OpenAI client at:")
+    print(f'    base_url = "{public}/v1"')
+    print(f'    model    = "{config.model_id()}"')
+    print('    api_key  = "not-used"')
+
+    if share_url:
         print()
-        print("  The public https://....gradio.live URL is printed above.")
-        print("  Append /v1 to it for the API, /docs for the docs.")
-        print()
-        print("  Anyone with that link can use this model. It stays up while")
-        print("  this process runs, for up to 72 hours.")
-    print("=" * 70)
+        print("  Anyone with the public URL can use this model. The link lasts")
+        print("  only while this process runs (at most a week).")
+
+    print(line)
     print("\nPress Ctrl+C (or stop the notebook cell) to shut down.\n")

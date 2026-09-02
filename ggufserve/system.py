@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -42,23 +43,115 @@ def run(cmd: list[str] | str, check: bool = False) -> subprocess.CompletedProces
     return proc
 
 
-def gpu_summary() -> str:
-    """One line per GPU, or an empty string when nvidia-smi is unavailable."""
+@dataclass
+class GpuStat:
+    index: int
+    name: str
+    used_gib: float
+    total_gib: float
+    util_pct: int | None
+    temp_c: int | None
+
+    def describe(self) -> str:
+        text = f"{self.name}  {self.used_gib:.1f} / {self.total_gib:.1f} GiB"
+        if self.total_gib:
+            text += f" ({self.used_gib / self.total_gib * 100:.0f}%)"
+        if self.util_pct is not None:
+            text += f"  util {self.util_pct}%"
+        if self.temp_c is not None:
+            text += f"  {self.temp_c}C"
+        return text
+
+
+def gpu_stats() -> list[GpuStat]:
+    """Current per-GPU memory, utilisation and temperature.
+
+    Returns an empty list when nvidia-smi is missing or fails, so callers can
+    treat "no GPU" and "cannot tell" the same way.
+    """
     if shutil.which("nvidia-smi") is None:
-        return ""
+        return []
+
     proc = run(
         [
             "nvidia-smi",
-            "--query-gpu=index,name,memory.total,memory.used,memory.free",
-            "--format=csv,noheader",
+            "--query-gpu=index,name,memory.used,memory.total,"
+            "utilization.gpu,temperature.gpu",
+            "--format=csv,noheader,nounits",
         ]
     )
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+    if proc.returncode != 0:
+        return []
+
+    stats = []
+    for line in proc.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 6:
+            continue
+        try:
+            stats.append(
+                GpuStat(
+                    index=int(parts[0]),
+                    name=parts[1],
+                    used_gib=float(parts[2]) / 1024,
+                    total_gib=float(parts[3]) / 1024,
+                    # These read "[N/A]" on some cards and in some VMs.
+                    util_pct=_maybe_int(parts[4]),
+                    temp_c=_maybe_int(parts[5]),
+                )
+            )
+        except ValueError:
+            continue
+    return stats
+
+
+def _maybe_int(value: str) -> int | None:
+    try:
+        return int(float(value))
+    except ValueError:
+        return None
 
 
 def gpu_count() -> int:
-    summary = gpu_summary()
-    return len(summary.splitlines()) if summary else 0
+    return len(gpu_stats())
+
+
+def human_size(num_bytes: int) -> str:
+    """Byte count as GiB, dropping to MiB so small files do not read as 0.00."""
+    gib = num_bytes / 1024**3
+    if gib < 1:
+        return f"{num_bytes / 1024**2:.0f} MiB"
+    return f"{gib:.2f} GiB"
+
+
+def ram_stats(meminfo: Path | None = None) -> tuple[float, float] | None:
+    """(used, total) system RAM in GiB, or None when it cannot be determined.
+
+    Reads /proc/meminfo, so this works on Linux — which covers Kaggle, Colab
+    and any CUDA host — and returns None elsewhere.
+    """
+    meminfo = meminfo or Path("/proc/meminfo")
+    if not meminfo.exists():
+        return None
+
+    values = {}
+    try:
+        for line in meminfo.read_text().splitlines():
+            key, _, rest = line.partition(":")
+            fields = rest.split()
+            if fields:
+                values[key] = int(fields[0]) / 1024**2  # kB -> GiB
+    except (OSError, ValueError):
+        return None
+
+    total = values.get("MemTotal")
+    if not total:
+        return None
+
+    # MemAvailable is the kernel's own estimate of what a new workload can
+    # actually claim, which is a truer "free" than MemFree.
+    available = values.get("MemAvailable", values.get("MemFree", 0.0))
+    return total - available, total
 
 
 def free_disk_gib(path: Path) -> float:
@@ -85,11 +178,16 @@ def report(model_dir: Path) -> None:
     else:
         print("   cuda   : nvcc not found")
 
-    summary = gpu_summary()
-    if summary:
-        for line in summary.splitlines():
-            print(f"   gpu    : {line}")
+    gpus = gpu_stats()
+    if gpus:
+        for gpu in gpus:
+            print(f"   gpu {gpu.index}  : {gpu.describe()}")
+        print(f"   vram   : {sum(g.total_gib for g in gpus):.1f} GiB total")
     else:
         warn("No NVIDIA GPU detected. gguf-serve needs CUDA to be useful.")
+
+    ram = ram_stats()
+    if ram:
+        print(f"   ram    : {ram[1]:.1f} GiB total")
 
     print(f"   models : {model_dir} ({free_disk_gib(model_dir):.1f} GiB free)")

@@ -143,7 +143,12 @@ def main(argv: list[str] | None = None) -> None:
 
     app = server.build(llm)
     port = server.pick_port(args.port)
-    server.launch(app, port=port, share=not args.no_share)
+    server.launch(
+        app,
+        port=port,
+        share=not args.no_share,
+        model_path=model_file,
+    )
 
 
 if __name__ == "__main__":

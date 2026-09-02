@@ -81,7 +81,7 @@ Share URLs are temporary. They die when:
 
 - the process stops, including stopping the notebook cell — the server lives inside it,
 - the Kaggle or Colab runtime hits its session limit,
-- 72 hours pass.
+- a week passes, which is Gradio's upper bound on a share tunnel.
 
 Re-running `launch.py` creates a new URL at a different address. If the model is still on disk the download is skipped, so a restart is quick.
 

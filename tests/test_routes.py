@@ -19,13 +19,14 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ggufserve import api, chat, config, model, webui
+from ggufserve import api, chat, config, model, server, system, webui
 from ggufserve.chat import split_response
 
 REASONING = "Let me think. 17*23 = 391."
@@ -73,6 +74,17 @@ def _with_config(fn, **overrides):
     finally:
         for key, value in previous.items():
             setattr(config, key, value)
+
+
+def _with_fake_smi(stdout: str, fn):
+    """Run `fn` with nvidia-smi stubbed out, so GPU parsing is testable."""
+    real_run, real_which = system.run, system.shutil.which
+    try:
+        system.shutil.which = lambda name: "/usr/bin/nvidia-smi"
+        system.run = lambda *a, **k: SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        return fn()
+    finally:
+        system.run, system.shutil.which = real_run, real_which
 
 
 def build_app(llm) -> FastAPI:
@@ -295,6 +307,67 @@ def main() -> int:
             "a missing file is rejected",
             model.validate(Path(tmp) / "nope.gguf")[0] is False,
         )
+
+    check.section("host stats")
+    # nvidia-smi output as it really looks with --noheader --nounits, including
+    # the [N/A] readings some cards and VMs return.
+    smi = (
+        "0, Tesla T4, 10379, 15360, 2, 49\n"
+        "1, Tesla T4, 11597, 15360, [N/A], [N/A]\n"
+        "garbage line\n"
+    )
+    gpus = _with_fake_smi(smi, system.gpu_stats)
+    check("both GPUs parsed, junk skipped", len(gpus) == 2, str(len(gpus)))
+    check("memory converted to GiB", round(gpus[0].used_gib, 2) == 10.14, str(gpus[0]))
+    check("utilisation parsed", gpus[0].util_pct == 2)
+    check("[N/A] becomes None, not a crash", gpus[1].util_pct is None)
+    check(
+        "description reads sensibly",
+        gpus[0].describe() == "Tesla T4  10.1 / 15.0 GiB (68%)  util 2%  49C",
+        gpus[0].describe(),
+    )
+    check("no GPU means an empty list", _with_fake_smi("", system.gpu_stats) == [])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        meminfo = Path(tmp) / "meminfo"
+        meminfo.write_text(
+            "MemTotal:       32873252 kB\n"
+            "MemFree:        27000000 kB\n"
+            "MemAvailable:   30000000 kB\n"
+            "Buffers:          100000 kB\n"
+        )
+        ram = system.ram_stats(meminfo)
+        check("total RAM parsed", ram and round(ram[1], 1) == 31.4, str(ram))
+        check(
+            "used derived from MemAvailable",
+            ram and round(ram[0], 1) == 2.7,
+            str(ram),
+        )
+        check(
+            "a missing meminfo returns None",
+            system.ram_stats(Path(tmp) / "nope") is None,
+        )
+
+    check("large sizes read as GiB", system.human_size(20876938144) == "19.44 GiB")
+    check("small sizes drop to MiB", system.human_size(2048) == "0 MiB")
+
+    check.section("share url extraction")
+    # Gradio returns (app, local_url, share_url) inside a TupleNoPrint.
+    check(
+        "public URL pulled from the launch result",
+        server._share_url((object(), "http://0.0.0.0:7860/", "https://abc.gradio.live"))
+        == "https://abc.gradio.live",
+    )
+    check(
+        "None when sharing is off",
+        server._share_url((object(), "http://0.0.0.0:7860/", None)) is None,
+    )
+    for odd in (None, (), (object(), "x"), (object(), "x", 123), "nope"):
+        if server._share_url(odd) is not None:
+            check(f"unexpected shape {odd!r} handled", False)
+            break
+    else:
+        check("unexpected shapes degrade to None instead of raising", True)
 
     check.section("inference lock")
 

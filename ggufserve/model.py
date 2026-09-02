@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 
 from ggufserve import config
-from ggufserve.system import free_disk_gib, gpu_count, gpu_summary, ok, step, warn
+from ggufserve.system import free_disk_gib, gpu_count, gpu_stats, ok, step, warn
 
 GGUF_MAGIC = b"GGUF"
 
@@ -196,9 +196,9 @@ def load(path: Path):
 
     ok("model loaded")
 
-    summary = gpu_summary()
-    if summary:
-        for line in summary.splitlines():
-            print(f"   gpu    : {line}")
+    # Shows how much VRAM was actually claimed, which is how you spot llama.cpp
+    # having quietly spilled layers into system RAM.
+    for gpu in gpu_stats():
+        print(f"   gpu {gpu.index}  : {gpu.describe()}")
 
     return llm

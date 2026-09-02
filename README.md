@@ -14,6 +14,38 @@ python launch.py
 
 That is the whole setup. It installs a CUDA build of llama.cpp that actually uses the GPU, downloads and verifies the model, splits it across however many GPUs you have, and serves everything on one public URL. Re-running skips whatever is already done.
 
+When it is ready you get everything you need in one block:
+
+```
+======================================================================
+  gguf-serve is running
+======================================================================
+
+  PUBLIC URL   https://fffdf9bc9bf4c2fc71.gradio.live
+
+  chat UI      https://fffdf9bc9bf4c2fc71.gradio.live/
+  API base     https://fffdf9bc9bf4c2fc71.gradio.live/v1
+  API docs     https://fffdf9bc9bf4c2fc71.gradio.live/docs
+  local        http://127.0.0.1:7860/
+
+  model        qwen3.8-27b-ud-q5-k-xl
+  file         Qwen3.8-27B-UD-Q5_K_XL.gguf  (19.44 GiB)
+  context      16,384 tokens
+  reasoning    </think> sections split off
+
+  GPU 0        Tesla T4  10.1 / 15.0 GiB (68%)  util 2%  49C
+  GPU 1        Tesla T4  11.3 / 15.0 GiB (76%)  util 1%  52C
+  RAM          8.2 / 31.0 GiB (26%)
+
+  Point any OpenAI client at:
+    base_url = "https://fffdf9bc9bf4c2fc71.gradio.live/v1"
+    model    = "qwen3.8-27b-ud-q5-k-xl"
+    api_key  = "not-used"
+======================================================================
+```
+
+The GPU line is worth a glance: if VRAM use is far below your card's capacity, llama.cpp quietly kept layers on the CPU and generation will be slow.
+
 Anything [llama.cpp](https://github.com/ggerganov/llama.cpp) can load works — Qwen, Llama, Mistral, Gemma, DeepSeek-R1, Phi. The only real constraint is that the model plus its KV cache fits your VRAM. The default is Qwen3.8-27B at Q5\_K\_XL, verified on Kaggle's free 2 × Tesla T4.
 
 ## What you get
@@ -155,7 +187,7 @@ Docs: [configuration](docs/configuration.md) · [API reference](docs/api.md) · 
 
 - **The public URL is unauthenticated.** Anyone with the link can use the model and spend your GPU quota. Treat it as temporary and share it carefully.
 - **One request at a time.** A single llama.cpp context cannot serve concurrent requests, so requests queue. This is a deliberate fit for a small GPU box, not an oversight.
-- **The share URL is temporary.** It lasts up to 72 hours and dies with the process.
+- **The share URL is temporary.** Gradio gives it up to a week, but in practice the notebook's own session limit ends it sooner, and it dies with the process either way.
 - **On a hosted notebook the model is re-downloaded after a restart**, because it lands in scratch space. [docs/configuration.md](docs/configuration.md) covers how to avoid that.
 - **Multi-part GGUF splits are not handled.** The model has to be one self-contained file.
 
