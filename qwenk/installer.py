@@ -36,7 +36,7 @@ def ensure_llama_cpp() -> None:
     step("Checking llama-cpp-python")
 
     if _gpu_offload_available():
-        ok(f"CUDA build already installed (llama_cpp {_installed('llama_cpp_python')})")
+        ok(f"CUDA build already installed (llama-cpp-python {_installed('llama-cpp-python')})")
         return
 
     print("   installing the pre-built CUDA wheel (~1.7 GB, takes a few minutes)")
@@ -56,7 +56,7 @@ def ensure_llama_cpp() -> None:
             "See docs/troubleshoot.md for how to fix the wheel selection."
         )
 
-    ok(f"CUDA build installed (llama_cpp {_installed('llama_cpp_python')})")
+    ok(f"CUDA build installed (llama-cpp-python {_installed('llama-cpp-python')})")
 
 
 def _gpu_offload_available() -> bool:
@@ -113,10 +113,20 @@ def import_gradio():
         import gradio
     except ImportError as first_error:
         warn(f"Gradio import failed ({first_error}); retrying with a clean cache")
+
         for name in list(sys.modules):
             if name == "huggingface_hub" or name.startswith("huggingface_hub."):
                 del sys.modules[name]
-        import gradio
+
+        try:
+            import gradio
+        except ImportError as second_error:
+            raise SystemExit(
+                f"Gradio could not be imported: {second_error}\n"
+                "Restart the runtime and re-run launch.py. The model file on "
+                "disk is unaffected, so only the load is repeated.\n"
+                "See docs/troubleshoot.md."
+            ) from second_error
 
     ok(f"gradio {gradio.__version__}")
     return gradio

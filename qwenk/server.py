@@ -13,7 +13,7 @@ from __future__ import annotations
 import socket
 import time
 
-from qwenk import api, config, webui
+from qwenk import api, config, installer, webui
 from qwenk.system import ok, step, warn
 
 
@@ -41,13 +41,16 @@ def build(llm):
     """Create the FastAPI/Gradio app with all routes attached."""
     step("Building server")
 
+    gradio = installer.import_gradio()
+
     try:
-        from gradio import Server
-    except ImportError as error:
+        Server = gradio.Server
+    except AttributeError as error:
         raise SystemExit(
-            f"Could not import gradio.Server ({error}).\n"
-            f"Qwen-K needs gradio {config.GRADIO_VERSION}; "
-            "run `python launch.py` without --skip-install to fix this."
+            f"This Gradio ({gradio.__version__}) has no `Server` class. "
+            f"Qwen-K needs gradio {config.GRADIO_VERSION}, which is what puts "
+            "the OpenAI routes and the share tunnel on one origin.\n"
+            "Run `python launch.py` without --skip-install to fix this."
         ) from error
 
     app = Server(

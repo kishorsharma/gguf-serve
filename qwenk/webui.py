@@ -7,8 +7,6 @@ string.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi.responses import FileResponse, HTMLResponse
 
 from qwenk.config import REPO_ROOT

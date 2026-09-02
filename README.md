@@ -113,9 +113,17 @@ qwenk/api.py         OpenAI-compatible routes
 qwenk/webui.py       routes serving the chat UI
 qwenk/server.py      assembles and launches the one public server
 web/                 chat UI (html, css, js)
+tests/               route tests that run without a GPU
 ```
 
 The whole thing is a single `gradio.Server`, which is a FastAPI app. Because the API routes, the chat UI, and the share tunnel all belong to that one app, they share one public origin — that is why there is no second process and no second tunnel to expose.
+
+The route tests stub out the model, so they need neither a GPU nor llama.cpp and run in a second on a laptop:
+
+```
+pip install fastapi httpx
+python tests/test_routes.py
+```
 
 Docs: [configuration](docs/configuration.md) · [API reference](docs/api.md) · [troubleshooting](docs/troubleshoot.md)
 

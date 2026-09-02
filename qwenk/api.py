@@ -128,6 +128,14 @@ def register(app, llm) -> None:
                         "finish_reason": "stop",
                     }
                 ],
+                # Zeroed rather than omitted: streaming llama.cpp does not
+                # report token counts, and clients that reach for
+                # `response.usage.total_tokens` crash on a missing field.
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
                 # Non-standard, and only populated when the caller asked for the
                 # reasoning to be separated out.
                 "reasoning_content": reasoning if strip_reasoning else None,
