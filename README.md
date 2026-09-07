@@ -201,6 +201,55 @@ print(response.choices[0].message.content)
 
 Reasoning models wrap their scratchpad in `</think>` tags. Non-streaming responses have it stripped for you; streaming responses do not, by default. [docs/api.md](docs/api.md) explains why and how to change it. Ordinary models never emit the tag, so nothing special happens for them.
 
+## Persistent remote API (Cloudflare Tunnel)
+
+By default the server publishes a `https://….gradio.live` URL, which needs no setup and is right for experimenting. It has two limits: the hostname is random and changes every restart, so anything configured against it breaks; and it is unauthenticated, so anyone holding the link can spend your GPU quota.
+
+Cloudflare Tunnel is the alternative. It is deliberately **not** part of gguf-serve — the server only ever listens on a local port, and the tunnel is a separate process pointing at it. Nothing in `ggufserve/` knows or cares which of these you use, so changing your networking never means touching the serving code.
+
+| | Setup | Hostname | Authentication |
+| --- | --- | --- | --- |
+| Gradio share (default) | none | random, per run | none |
+| Cloudflare quick tunnel | none | random, per run | none |
+| Cloudflare named tunnel | account + domain | yours, permanent | optional, via Access |
+
+Cell **1b** of the notebook runs either Cloudflare mode. It has to run **before** cell 2, because cell 2 blocks for as long as the server lives and Kaggle will not start another cell while one is blocked.
+
+### Quick tunnel
+
+Run cell 1b with `TUNNEL_TOKEN` left empty. It downloads `cloudflared`, opens a tunnel to port 7860, and prints a `trycloudflare.com` URL. No account, no domain. Useful mainly when Gradio's tunnel is blocked or flaky, since it shares the same weaknesses otherwise.
+
+### Named tunnel
+
+This is the one worth the setup: a hostname you own, unchanged across restarts, and the option of real authentication.
+
+1. In the Cloudflare **Zero Trust** dashboard, go to *Networks → Tunnels → Create a tunnel*, choose **Cloudflared**, and name it.
+2. Copy the tunnel token out of the install command it shows you.
+3. Add a **public hostname**: pick the subdomain and domain, set the service to **HTTP** and the URL to `localhost:7860`.
+4. Store the token in Kaggle under *Add-ons → Secrets* as `CLOUDFLARE_TUNNEL_TOKEN`. Do not paste it into the notebook — notebooks get shared and forked, and the token is enough to publish traffic under your hostname.
+5. Run cell 1b, then cell 2. Set `SHARE = False` in cell 2 as well, or you will publish an unprotected `gradio.live` URL alongside the protected one.
+
+Your API base becomes `https://llm.example.com/v1` and stays there.
+
+### Locking it down with Access
+
+A named tunnel is still open to the internet until you put a policy in front of it. In *Zero Trust → Access → Applications*, add a **self-hosted** application for the hostname and attach a policy.
+
+One catch that is easy to get wrong: a normal Access policy expects an interactive browser login, which an API client cannot do, so adding one will lock out your own scripts. Issue a **service token** (*Access → Service auth*), allow it in the policy, and send it as two headers:
+
+```python
+client = OpenAI(
+    base_url="https://llm.example.com/v1",
+    api_key="not-used",
+    default_headers={
+        "CF-Access-Client-Id": "<id>.access",
+        "CF-Access-Client-Secret": "<secret>",
+    },
+)
+```
+
+Note that editors which only let you set a base URL and an API key — Cursor among them — cannot send those headers. To use one of those against a protected endpoint you need a policy that admits it another way, such as bypassing for your own IP range.
+
 ## Requirements
 
 | | Minimum | Notes |
