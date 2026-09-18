@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib.metadata as metadata
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 from ggufserve import config
-from ggufserve.system import ok, step, warn
+from ggufserve.system import info, ok, step, warn
 
 
 def _pip(*args: str) -> None:
@@ -19,6 +21,52 @@ def _installed(package: str) -> str | None:
         return metadata.version(package)
     except metadata.PackageNotFoundError:
         return None
+
+
+def persistent_cache_dir() -> Path | None:
+    """Directory that survives a Kaggle/Colab session restart, if there is one.
+
+    The CUDA wheel is ~1.7 GB and pip's own cache lives in `$HOME`, which those
+    hosts wipe. `/kaggle/working` and `/content` are what actually persist.
+    """
+    override = os.environ.get("GGUF_SERVE_WHEEL_DIR")
+    if override:
+        return Path(override)
+    for parent in (Path("/kaggle/working"), Path("/content")):
+        if parent.is_dir():
+            return parent / "gguf-serve-cache"
+    return None
+
+
+def _cached_wheel(cache: Path) -> Path | None:
+    wheels = sorted(cache.glob("llama_cpp_python-*.whl"))
+    return wheels[-1] if wheels else None
+
+
+def _download_wheel(cache: Path) -> Path:
+    """Fetch the CUDA wheel into `cache` so the next restart can skip GitHub."""
+    cache.mkdir(parents=True, exist_ok=True)
+    info(f"downloading CUDA wheel into {cache} (~1.7 GB, kept across restarts)")
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "download",
+            "--only-binary=:all:",
+            "--no-deps",
+            "--extra-index-url",
+            config.LLAMA_CPP_WHEEL_INDEX,
+            "llama-cpp-python",
+            "-d",
+            str(cache),
+        ],
+        check=True,
+    )
+    wheel = _cached_wheel(cache)
+    if wheel is None:
+        raise SystemExit(f"pip download finished but no wheel landed in {cache}")
+    return wheel
 
 
 def ensure_llama_cpp() -> None:
@@ -34,14 +82,28 @@ def ensure_llama_cpp() -> None:
         ok(f"CUDA build already installed (llama-cpp-python {_installed('llama-cpp-python')})")
         return
 
-    print("   installing the pre-built CUDA wheel (~1.7 GB, takes a few minutes)")
-    _pip(
-        "--upgrade",
-        "--only-binary=:all:",
-        "llama-cpp-python",
-        "--extra-index-url",
-        config.LLAMA_CPP_WHEEL_INDEX,
-    )
+    cache = persistent_cache_dir()
+    wheel = _cached_wheel(cache) if cache is not None else None
+    if wheel is not None:
+        info(f"installing cached wheel {wheel.name}")
+        _pip(str(wheel))
+        if _gpu_offload_available():
+            ok(f"CUDA build installed from cache (llama-cpp-python {_installed('llama-cpp-python')})")
+            return
+        warn("cached wheel has no CUDA offload; downloading a fresh one")
+
+    if cache is not None:
+        wheel = _download_wheel(cache)
+        _pip(str(wheel))
+    else:
+        print("   installing the pre-built CUDA wheel (~1.7 GB, takes a few minutes)")
+        _pip(
+            "--upgrade",
+            "--only-binary=:all:",
+            "llama-cpp-python",
+            "--extra-index-url",
+            config.LLAMA_CPP_WHEEL_INDEX,
+        )
 
     if not _gpu_offload_available():
         raise SystemExit(

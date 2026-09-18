@@ -59,6 +59,54 @@ function scrollToBottom() {
  * reasoning from answer, so everything is provisionally reasoning; the caller
  * reruns this on the full buffer once the stream ends.
  */
+function formatToolCalls(calls) {
+  return calls
+    .filter((call) => call?.function?.name)
+    .map((call) => {
+      let args = call.function.arguments || "";
+      try {
+        args = JSON.stringify(JSON.parse(args), null, 2);
+      } catch (_) {}
+      return "⚙ " + call.function.name + (args ? "\n" + args : "");
+    })
+    .join("\n\n");
+}
+
+function mergeToolCallDelta(toolCalls, parts) {
+  for (const part of parts) {
+    const index = part.index ?? toolCalls.length;
+    if (!toolCalls[index]) {
+      toolCalls[index] = {
+        id: part.id,
+        type: part.type || "function",
+        function: { name: "", arguments: "" },
+      };
+    }
+    const slot = toolCalls[index];
+    if (part.id) {
+      slot.id = part.id;
+    }
+    if (part.function?.name) {
+      slot.function.name += part.function.name;
+    }
+    if (part.function?.arguments) {
+      slot.function.arguments += part.function.arguments;
+    }
+  }
+}
+
+function renderAssistant(answerBox, reasoningBox, raw, toolCalls) {
+  const split = splitReasoning(raw);
+  if (showReasoning.checked) {
+    reasoningBox.textContent = split.reasoning;
+    reasoningBox.style.display = split.reasoning ? "block" : "none";
+  }
+  const answer = raw.includes(THINK_END) ? split.answer : raw;
+  const tools = formatToolCalls(toolCalls);
+  answerBox.textContent = [answer.trim(), tools].filter(Boolean).join("\n\n");
+  scrollToBottom();
+}
+
 function splitReasoning(text) {
   const end = text.indexOf(THINK_END);
 
@@ -118,6 +166,7 @@ async function sendMessage() {
   controller = new AbortController();
 
   let raw = "";
+  let toolCalls = [];
   const started = performance.now();
 
   try {
@@ -176,37 +225,26 @@ async function sendMessage() {
             throw new Error(parsed.error.message || "server error");
           }
 
-          const piece = parsed.choices?.[0]?.delta?.content || "";
-          if (!piece) {
+          const delta = parsed.choices?.[0]?.delta || {};
+          if (delta.tool_calls) {
+            mergeToolCallDelta(toolCalls, delta.tool_calls);
+          }
+          const piece = delta.content || "";
+          if (piece) {
+            raw += piece;
+          }
+          if (!piece && !delta.tool_calls) {
             continue;
           }
 
-          raw += piece;
-
-          // Reparsing the whole buffer each chunk is free next to inference,
-          // and it keeps the `</think>` boundary correct even when the tag is
-          // split across two chunks.
-          const split = splitReasoning(raw);
-
-          if (showReasoning.checked) {
-            reasoningBox.textContent = split.reasoning;
-            reasoningBox.style.display = split.reasoning ? "block" : "none";
-          }
-
-          answerBox.textContent = split.answer;
-          scrollToBottom();
+          renderAssistant(answerBox, reasoningBox, raw, toolCalls);
         }
       }
     }
 
-    const split = splitReasoning(raw);
-
-    // No closing tag means the model never opened a reasoning section, so the
-    // whole response was the answer all along.
-    const answer = raw.includes(THINK_END) ? split.answer : raw.trim();
-
-    answerBox.textContent = answer;
-    history.push({ role: "assistant", content: answer });
+    renderAssistant(answerBox, reasoningBox, raw, toolCalls);
+    const visible = answerBox.textContent.trim();
+    history.push({ role: "assistant", content: visible });
 
     const seconds = (performance.now() - started) / 1000;
     setStatus(`Done in ${seconds.toFixed(1)}s`, "ok");

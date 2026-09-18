@@ -21,6 +21,10 @@ THINK_START = "<think>"
 _lock = threading.Lock()
 
 _TOOL_BLOCK = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
+_TOOL_MARK = re.compile(r"<tool_call|<function=", re.IGNORECASE)
+# Hold back a short suffix while streaming so a tag split across tokens is not
+# flushed as ordinary text before we can see it is a tool call.
+_HOLD = 16
 _FUNCTION_BLOCK = re.compile(
     r"<function=(?P<name>[\w.:-]+)>(?P<body>.*?)</function>",
     re.DOTALL | re.IGNORECASE,
@@ -177,13 +181,14 @@ def collect(
     tools: list[dict[str, Any]] | None = None,
     tool_choice: Any = None,
     functions: list[dict[str, Any]] | None = None,
-    parse_markup: bool = False,
+    parse_markup: bool = True,
 ) -> tuple[str, list[dict[str, Any]] | None, str]:
     """Run a completion to the end.
 
     Returns `(raw_text, tool_calls, finish_reason)`. `tool_calls` comes from
     llama.cpp when it already emits OpenAI deltas, and from `extract_tool_calls`
-    when `parse_markup` is set and the model wrote Qwen XML instead.
+    when the model wrote Qwen XML into `content` instead. Markup is parsed even
+    if the client omitted `tools`, because coder GGUFs emit it anyway.
     """
     parts: list[str] = []
     tool_deltas: list[list[dict[str, Any]]] = []
@@ -218,6 +223,74 @@ def collect(
             return remainder, parsed, "tool_calls"
 
     return raw, None, finish or "stop"
+
+
+def iter_client_events(
+    llm,
+    messages: list[dict[str, Any]],
+    temperature: float | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    max_tokens: int | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = None,
+    functions: list[dict[str, Any]] | None = None,
+) -> Iterator[ChatDelta]:
+    """Stream content, withholding Qwen tool-call markup for the final delta.
+
+    Tokens before `<tool_call` / `<function=` are forwarded live. The markup
+    itself is rewritten as OpenAI `tool_calls` so clients never see the tags
+    as a finished answer.
+    """
+    raw = ""
+    emitted = 0
+    tool_deltas: list[list[dict[str, Any]]] = []
+    finish = "stop"
+
+    def take(up_to: int) -> str:
+        nonlocal emitted
+        if up_to <= emitted:
+            return ""
+        piece = raw[emitted:up_to]
+        emitted = up_to
+        return piece
+
+    for event in complete(
+        llm,
+        messages,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        max_tokens=max_tokens,
+        tools=tools,
+        tool_choice=tool_choice,
+        functions=functions,
+    ):
+        if event.tool_calls:
+            tool_deltas.append(event.tool_calls)
+        if event.finish_reason:
+            finish = event.finish_reason
+        if not event.content:
+            continue
+        raw += event.content
+        mark = _TOOL_MARK.search(raw)
+        if mark:
+            piece = take(mark.start())
+        else:
+            piece = take(max(emitted, len(raw) - _HOLD))
+        if piece:
+            yield ChatDelta(content=piece)
+
+    merged = _merge_tool_call_deltas(tool_deltas)
+    parsed, _remainder = extract_tool_calls(raw)
+    calls = merged or parsed
+    if calls:
+        yield ChatDelta(tool_calls=calls, finish_reason="tool_calls")
+        return
+    leftover = take(len(raw))
+    if leftover:
+        yield ChatDelta(content=leftover)
+    yield ChatDelta(finish_reason=finish or "stop")
 
 
 def generate(

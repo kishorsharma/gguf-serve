@@ -17,6 +17,7 @@ import ast
 import contextlib
 import io
 import json
+import os
 import re
 import sys
 import tempfile
@@ -31,7 +32,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ggufserve import api, chat, config, model, server, system, webui
+from ggufserve import api, chat, config, installer, model, server, system, webui
 from ggufserve.chat import extract_tool_calls, split_response
 import launch
 from launch import _count_steps, _parse_split
@@ -63,6 +64,14 @@ SHELL_XML = (
     '{"name": "shell", "arguments": {"command": "pwd"}}\n'
     "</tool_call>"
 )
+QWEN_CODER_XML = """I'll search for information about a Cluley AI assistant.
+
+<tool_call>
+<function=web_search>
+<parameter=query>
+Cluley AI assistant tool</parameter>
+</function>
+</tool_call>"""
 
 
 class StubLlama:
@@ -422,16 +431,45 @@ def main() -> int:
         "/v1/chat/completions",
         json={"messages": [{"role": "user", "content": "pwd"}]},
     ).json()
+    message = body["choices"][0]["message"]
     check(
-        "without tools, XML stays in content",
-        SHELL_XML in (body["choices"][0]["message"]["content"] or ""),
-        repr(body["choices"][0]["message"]["content"]),
+        "without tools, Qwen XML still becomes tool_calls",
+        (message.get("tool_calls") or [{}])[0].get("function", {}).get("name") == "shell",
+        repr(message.get("tool_calls")),
     )
     check(
-        "without tools, finish_reason stays stop",
-        body["choices"][0]["finish_reason"] == "stop",
+        "without tools, finish_reason is still tool_calls",
+        body["choices"][0]["finish_reason"] == "tool_calls",
     )
-    check("without tools, tool_calls are absent", "tool_calls" not in body["choices"][0]["message"])
+    check("XML is stripped out of content", "<tool_call>" not in (message.get("content") or ""))
+
+    llm.chunks = [{"choices": [{"delta": {"content": QWEN_CODER_XML}}]}]
+    body = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "check cluley"}]},
+    ).json()
+    message = body["choices"][0]["message"]
+    check(
+        "nested <function=name> inside <tool_call> parses",
+        (message.get("tool_calls") or [{}])[0].get("function", {}).get("name")
+        == "web_search",
+        repr(message.get("tool_calls")),
+    )
+    check(
+        "nested parameter values survive",
+        json.loads(
+            (message.get("tool_calls") or [{}])[0]
+            .get("function", {})
+            .get("arguments")
+            or "{}"
+        )
+        == {"query": "Cluley AI assistant tool"},
+    )
+    check(
+        "preface is kept as content",
+        "I'll search" in (message.get("content") or ""),
+        repr(message.get("content")),
+    )
 
     llm.chunks = [
         {
@@ -484,6 +522,33 @@ def main() -> int:
     )
     check("streaming finish_reason is tool_calls", stream_finish == "tool_calls")
     check("tool-call stream ends with [DONE]", stream_done)
+
+    llm.chunks = [{"choices": [{"delta": {"content": QWEN_CODER_XML}}]}]
+    streamed_calls, stream_finish, streamed_text = [], None, ""
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "check cluley"}], "stream": True},
+    ) as response:
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                continue
+            chunk = json.loads(payload)
+            delta = chunk["choices"][0]["delta"]
+            streamed_text += delta.get("content") or ""
+            streamed_calls.extend(delta.get("tool_calls") or [])
+            stream_finish = chunk["choices"][0]["finish_reason"] or stream_finish
+    check(
+        "streaming without tools still emits delta.tool_calls",
+        any(call.get("function", {}).get("name") == "web_search" for call in streamed_calls),
+        repr(streamed_calls),
+    )
+    check("streaming withholds the XML tags from content", "<tool_call>" not in streamed_text)
+    check("streaming still keeps the preface", "I'll search" in streamed_text)
+    check("streaming nested XML finish_reason is tool_calls", stream_finish == "tool_calls")
 
     check.section("streaming completion")
     streamed, events, done, finish = "", 0, False, None
@@ -568,6 +633,40 @@ def main() -> int:
         parsed and json.loads(parsed[0]["function"]["arguments"]) == {"command": "pwd"},
     )
 
+    parsed, leftover = extract_tool_calls(QWEN_CODER_XML)
+    check(
+        "coder-style nested XML parses",
+        parsed and parsed[0]["function"]["name"] == "web_search",
+        repr(parsed),
+    )
+    check(
+        "coder-style leftover is the preface",
+        leftover.startswith("I'll search"),
+        repr(leftover),
+    )
+
+    captured = (
+        "I'll search for that term for you. It might be a typo - let me check a few possibilities.\n\n"
+        "<tool_call>\n<function=web_search>\n<parameter=query>\n"
+        '"cluley" AI assistant</parameter>\n</function>\n</tool_call>\n'
+        "<tool_call>\n<function=web_search>\n<parameter=query>\n"
+        '"Cluey" AI assistant</parameter>\n</function>\n</tool_call>'
+    )
+    parsed, leftover = extract_tool_calls(captured)
+    check("captured dump yields two web_search calls", len(parsed) == 2, str(len(parsed)))
+    check(
+        "first query is cluley",
+        parsed and json.loads(parsed[0]["function"]["arguments"])["query"]
+        == '"cluley" AI assistant',
+        repr(parsed[0]["function"]["arguments"] if parsed else None),
+    )
+    check(
+        "second query is Cluey",
+        len(parsed) == 2
+        and json.loads(parsed[1]["function"]["arguments"])["query"]
+        == '"Cluey" AI assistant',
+    )
+    check("captured dump XML is stripped", "<tool_call>" not in leftover)
     none, original = extract_tool_calls("I will inspect the repository.")
     check("prose without markup is left alone", none == [] and original == "I will inspect the repository.")
 
@@ -598,6 +697,55 @@ def main() -> int:
             "a missing file is rejected",
             model.validate(Path(tmp) / "nope.gguf")[0] is False,
         )
+
+        dataset = Path(tmp) / "input" / "my-gguf"
+        dataset.mkdir(parents=True)
+        attached = dataset / "kept.gguf"
+        attached.write_bytes(b"GGUF" + b"\0" * 1020)
+        check(
+            "an attached Kaggle dataset copy is found",
+            model.find_attached_model("kept.gguf", root=Path(tmp) / "input") == attached,
+        )
+        check(
+            "a missing attached copy is None",
+            model.find_attached_model("nope.gguf", root=Path(tmp) / "input") is None,
+        )
+        check(
+            "a dataset slug pins the search",
+            model.find_attached_model(
+                "kept.gguf", root=Path(tmp) / "input", dataset="my-gguf"
+            )
+            == attached,
+        )
+        renamed = dataset / "other-name.gguf"
+        attached.replace(renamed)
+        check(
+            "a named dataset with one GGUF is used even if the filename differs",
+            model.find_attached_model(
+                "kept.gguf", root=Path(tmp) / "input", dataset="my-gguf"
+            )
+            == renamed,
+        )
+        check(
+            "a normal model path is not redirected",
+            model._download_dest(Path(tmp) / "model.gguf") == Path(tmp) / "model.gguf",
+        )
+
+    check.section("wheel cache")
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = Path(tmp) / "wheels"
+        previous = os.environ.get("GGUF_SERVE_WHEEL_DIR")
+        os.environ["GGUF_SERVE_WHEEL_DIR"] = str(cache)
+        try:
+            check(
+                "GGUF_SERVE_WHEEL_DIR selects the cache directory",
+                installer.persistent_cache_dir() == cache,
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("GGUF_SERVE_WHEEL_DIR", None)
+            else:
+                os.environ["GGUF_SERVE_WHEEL_DIR"] = previous
 
     check.section("kv cache type")
     check("f16 and q8_0 map to ggml type ids", model.KV_CACHE_TYPES == {"f16": 1, "q8_0": 8})

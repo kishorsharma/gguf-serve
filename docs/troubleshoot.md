@@ -72,7 +72,7 @@ If you see *"could not reach the server, so size was not verified"*, gguf-serve 
 
 ## "Not enough disk space"
 
-Checked before downloading, against the real file size plus 5%. On Kaggle, `/kaggle/working` has only 20 GB, which is why the default target is `/tmp`. Point somewhere larger with `--model-dir` and check free space with `df -h`.
+Checked before downloading, against the real file size plus 5%. On Kaggle, `/kaggle/working` has only 20 GB, which is why the default target is `/tmp`. `/tmp` does not survive a session restart. Keep a large GGUF by attaching it as a dataset (`MODEL_DIR = "/kaggle/input/<slug>"`). The CUDA wheel is cached separately under `/kaggle/working/gguf-serve-cache`. Point `--model-dir` somewhere larger if you are not on Kaggle, and check free space with `df -h`.
 
 ## Gradio import fails after installing
 

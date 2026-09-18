@@ -6,9 +6,9 @@ and it is the behaviour third-party OpenAI clients were tested against. Send
 `extra_body.chat_template_kwargs.enable_thinking = true` to have the server
 strip the reasoning instead and return only the final answer.
 
-When the request includes `tools`, the server forwards them to llama.cpp and
-returns OpenAI `tool_calls` — including Qwen `<tool_call>` markup that
-llama-cpp-python would otherwise leave in `content`.
+When the model writes Qwen `<tool_call>` / `<function=` markup — with or
+without a `tools` array on the request — the server rewrites it into OpenAI
+`tool_calls` instead of leaving the tags in `content`.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ggufserve import config
-from ggufserve.chat import collect, generate, separate
+from ggufserve.chat import collect, iter_client_events, separate
 
 
 class ChatCompletionRequest(BaseModel):
@@ -79,51 +79,39 @@ def _assistant_message(
     reasoning, answer = separate(raw)
     message: dict[str, Any] = {
         "role": "assistant",
-        # Hermes treats a non-null content field as a finished answer even
-        # when tool_calls are also present, so keep content empty on a call.
-        "content": None if tool_calls else answer,
+        "content": answer or None,
     }
     if tool_calls:
         message["tool_calls"] = tool_calls
     return message, (reasoning if strip_reasoning else None)
 
 
-def _buffered_stream(request_id: str, message: dict, finish_reason: str):
-    """Turn a finished completion into OpenAI chat.completion.chunk events.
+def _stream_tool_calls(calls: list[dict]) -> list[dict]:
+    streamed = []
+    for index, call in enumerate(calls):
+        streamed.append(
+            {
+                "index": index,
+                "id": call.get("id"),
+                "type": call.get("type") or "function",
+                "function": {
+                    "name": call["function"]["name"],
+                    "arguments": call["function"].get("arguments") or "",
+                },
+            }
+        )
+    return streamed
 
-    Used when `tools` were sent: the full generation is collected first so
-    Qwen XML can be rewritten as `delta.tool_calls` instead of being streamed
-    as ordinary text that Hermes would treat as a finished answer.
-    """
-    yield _sse(_chunk(request_id, {"role": "assistant"}))
 
-    tool_calls = message.get("tool_calls")
-    content = message.get("content")
-    if tool_calls:
-        for index, call in enumerate(tool_calls):
-            yield _sse(
-                _chunk(
-                    request_id,
-                    {
-                        "tool_calls": [
-                            {
-                                "index": index,
-                                "id": call.get("id"),
-                                "type": call.get("type") or "function",
-                                "function": {
-                                    "name": call["function"]["name"],
-                                    "arguments": call["function"].get("arguments") or "",
-                                },
-                            }
-                        ]
-                    },
-                )
-            )
-    elif content:
-        yield _sse(_chunk(request_id, {"content": content}))
-
-    yield _sse(_chunk(request_id, {}, finish_reason=finish_reason))
-    yield "data: [DONE]\n\n"
+def _sse_response(iterator) -> StreamingResponse:
+    return StreamingResponse(
+        iterator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def register(app, llm) -> None:
@@ -172,56 +160,93 @@ def register(app, llm) -> None:
 
         strip_reasoning = _strip_reasoning_requested(request)
         request_id = "chatcmpl-" + uuid.uuid4().hex
-        parse_markup = bool(request.tools or request.functions)
-        # Live token streaming is only safe when we are not going to rewrite
-        # the output as tool_calls. With tools present, collect first.
-        live_stream = request.stream and not parse_markup
 
-        if live_stream:
-            stream = generate(
-                llm,
-                request.messages,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                top_k=request.top_k,
-                max_tokens=request.max_tokens,
-            )
+        if request.stream:
+            if strip_reasoning:
+                raw, tool_calls, finish_reason = collect(
+                    llm,
+                    request.messages,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    top_k=request.top_k,
+                    max_tokens=request.max_tokens,
+                    tools=request.tools,
+                    tool_choice=request.tool_choice,
+                    functions=request.functions,
+                )
+                message, _reasoning = _assistant_message(raw, tool_calls, True)
+                if not tool_calls:
+                    finish_reason = "stop"
 
-            def event_stream():
-                buffer = ""
-                try:
-                    for piece in stream:
-                        buffer += piece
-                        if not strip_reasoning:
+                def buffered_events():
+                    try:
+                        yield _sse(_chunk(request_id, {"role": "assistant"}))
+                        content = message.get("content")
+                        if content:
+                            yield _sse(_chunk(request_id, {"content": content}))
+                        if message.get("tool_calls"):
                             yield _sse(
                                 _chunk(
-                                    request_id, {"role": "assistant", "content": piece}
+                                    request_id,
+                                    {
+                                        "tool_calls": _stream_tool_calls(
+                                            message["tool_calls"]
+                                        )
+                                    },
                                 )
                             )
-
-                    if strip_reasoning:
-                        _, answer = separate(buffer)
                         yield _sse(
-                            _chunk(request_id, {"role": "assistant", "content": answer})
+                            _chunk(request_id, {}, finish_reason=finish_reason)
                         )
+                        yield "data: [DONE]\n\n"
+                    except Exception as error:
+                        yield _sse(
+                            {
+                                "error": {
+                                    "message": str(error),
+                                    "type": type(error).__name__,
+                                }
+                            }
+                        )
+                        yield "data: [DONE]\n\n"
 
-                    yield _sse(_chunk(request_id, {}, finish_reason="stop"))
+                return _sse_response(buffered_events())
+
+            def event_stream():
+                try:
+                    yield _sse(_chunk(request_id, {"role": "assistant"}))
+                    for event in iter_client_events(
+                        llm,
+                        request.messages,
+                        temperature=request.temperature,
+                        top_p=request.top_p,
+                        top_k=request.top_k,
+                        max_tokens=request.max_tokens,
+                        tools=request.tools,
+                        tool_choice=request.tool_choice,
+                        functions=request.functions,
+                    ):
+                        delta: dict[str, Any] = {}
+                        if event.content:
+                            delta["content"] = event.content
+                        if event.tool_calls:
+                            delta["tool_calls"] = _stream_tool_calls(event.tool_calls)
+                        if delta:
+                            yield _sse(_chunk(request_id, delta))
+                        if event.finish_reason:
+                            yield _sse(
+                                _chunk(
+                                    request_id, {}, finish_reason=event.finish_reason
+                                )
+                            )
                     yield "data: [DONE]\n\n"
-
-                except Exception as error:  # surfaced to the client, not swallowed
+                except Exception as error:
                     yield _sse(
                         {"error": {"message": str(error), "type": type(error).__name__}}
                     )
                     yield "data: [DONE]\n\n"
 
-            return StreamingResponse(
-                event_stream(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-            )
+            return _sse_response(event_stream())
 
         raw, tool_calls, finish_reason = collect(
             llm,
@@ -233,30 +258,10 @@ def register(app, llm) -> None:
             tools=request.tools,
             tool_choice=request.tool_choice,
             functions=request.functions,
-            parse_markup=parse_markup,
         )
         message, reasoning = _assistant_message(raw, tool_calls, strip_reasoning)
         if not tool_calls:
             finish_reason = "stop"
-
-        if request.stream:
-            def buffered_events():
-                try:
-                    yield from _buffered_stream(request_id, message, finish_reason)
-                except Exception as error:
-                    yield _sse(
-                        {"error": {"message": str(error), "type": type(error).__name__}}
-                    )
-                    yield "data: [DONE]\n\n"
-
-            return StreamingResponse(
-                buffered_events(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-            )
 
         return {
             "id": request_id,

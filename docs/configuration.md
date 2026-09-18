@@ -72,13 +72,11 @@ By default the GGUF goes to `/tmp`, which a Kaggle or Colab restart wipes — co
 
 The reliable fix is to store the model outside the notebook.
 
-**Kaggle** — fetch the file once with `--download-only`, upload it as a Kaggle Dataset, attach the dataset, then point at it:
+**Kaggle** — `/tmp` is wiped on every new session, and `/kaggle/working` is capped at 20 GB, so a 19 GB GGUF cannot live there next to the CUDA wheel. Upload the `.gguf` as a Kaggle Dataset, attach it (*Add Input → Your Datasets*), then set `KAGGLE_DATASET` in the notebook to the dataset slug (the folder name under `/kaggle/input`). Leave it empty to download from Hugging Face.
 
-```
-python launch.py --model-dir /kaggle/input/your-dataset-name
-```
+Attached datasets take precedence over a download. If the attached filename matches `MODEL_FILE` (or the basename of `MODEL_URL`), the copy is used even when `KAGGLE_DATASET` is left blank. Inputs are read-only, so a missing file still downloads to `/tmp` rather than into `/kaggle/input`.
 
-Attached datasets are read-only, which is fine: the file is already there, so it is verified and the download skipped.
+The llama-cpp-python CUDA wheel (~1.7 GB) is cached in `/kaggle/working/gguf-serve-cache` after the first install, which does persist, so later restarts reuse that file instead of hitting GitHub.
 
 **Colab** — mount Drive and use a folder on it:
 

@@ -85,6 +85,48 @@ def validate(path: Path, expected_bytes: int | None = None) -> tuple[bool, str]:
     return True, human
 
 
+def find_attached_model(
+    filename: str, root: Path | None = None, dataset: str | None = None
+) -> Path | None:
+    """A matching GGUF already attached as a Kaggle dataset, if there is one.
+
+    Datasets land under `/kaggle/input/<slug>/` and survive session restarts,
+    which is the only practical way to keep a ~19 GB file on Kaggle — working
+    disk is capped at 20 GB and `/tmp` is wiped.
+
+    `dataset` (or `GGUF_SERVE_KAGGLE_DATASET`) pins the search to one slug.
+    Leave it unset to use any attached copy whose filename matches.
+    """
+    if dataset is None:
+        dataset = (os.environ.get("GGUF_SERVE_KAGGLE_DATASET") or "").strip() or None
+    base = root if root is not None else Path("/kaggle/input")
+    search = base / dataset if dataset else base
+    if not search.is_dir():
+        return None
+    for candidate in sorted(search.rglob(filename)):
+        valid, _ = validate(candidate)
+        if valid:
+            return candidate
+    # Named dataset whose single GGUF was uploaded under a different filename.
+    if dataset:
+        ggufs = [path for path in sorted(search.rglob("*.gguf")) if validate(path)[0]]
+        if len(ggufs) == 1:
+            return ggufs[0]
+    return None
+
+
+def _download_dest(path: Path) -> Path:
+    """Keep downloads out of read-only Kaggle input mounts."""
+    kaggle_input = Path("/kaggle/input")
+    try:
+        path.resolve().relative_to(kaggle_input.resolve())
+    except ValueError:
+        return path
+    fallback = Path("/tmp/gguf-serve/models") / path.name
+    warn(f"{path.parent} is a read-only Kaggle input; downloading to {fallback.parent}")
+    return fallback
+
+
 def acquire() -> Path:
     """Return a validated model path, downloading it only if necessary."""
     step("Locating model")
@@ -98,6 +140,11 @@ def acquire() -> Path:
     if expected:
         info(f"expected size {expected / 1024**3:.2f} GiB (from the server)")
 
+    attached = find_attached_model(config.MODEL_FILE)
+    if attached is not None:
+        ok(f"using attached dataset copy at {attached}")
+        return attached
+
     valid, detail = validate(path, expected)
     if valid:
         ok(f"already present at {path} ({detail})")
@@ -106,6 +153,7 @@ def acquire() -> Path:
         return path
 
     info(f"{path}: {detail}")
+    path = _download_dest(path)
 
     if path.exists():
         info("removing the unusable file before retrying")
