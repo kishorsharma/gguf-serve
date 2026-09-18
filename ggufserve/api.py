@@ -5,6 +5,10 @@ included, and the client separates them. That is what the bundled web UI does,
 and it is the behaviour third-party OpenAI clients were tested against. Send
 `extra_body.chat_template_kwargs.enable_thinking = true` to have the server
 strip the reasoning instead and return only the final answer.
+
+When the request includes `tools`, the server forwards them to llama.cpp and
+returns OpenAI `tool_calls` — including Qwen `<tool_call>` markup that
+llama-cpp-python would otherwise leave in `content`.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ggufserve import config
-from ggufserve.chat import generate, separate
+from ggufserve.chat import collect, generate, separate
 
 
 class ChatCompletionRequest(BaseModel):
@@ -30,6 +34,9 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int = config.MAX_TOKENS
     stream: bool = False
     extra_body: Optional[Dict[str, Any]] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Any] = None
+    functions: Optional[List[Dict[str, Any]]] = None
 
 
 def _strip_reasoning_requested(request: ChatCompletionRequest) -> bool:
@@ -51,6 +58,72 @@ def _chunk(request_id: str, delta: dict, finish_reason: str | None = None) -> di
         "model": config.model_id(),
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     }
+
+
+def _usage() -> dict:
+    # Zeroed rather than omitted: streaming llama.cpp does not report token
+    # counts, and clients that reach for `response.usage.total_tokens` crash
+    # on a missing field.
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
+def _assistant_message(
+    raw: str,
+    tool_calls: list[dict] | None,
+    strip_reasoning: bool,
+) -> tuple[dict, str | None]:
+    reasoning, answer = separate(raw)
+    message: dict[str, Any] = {
+        "role": "assistant",
+        # Hermes treats a non-null content field as a finished answer even
+        # when tool_calls are also present, so keep content empty on a call.
+        "content": None if tool_calls else answer,
+    }
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return message, (reasoning if strip_reasoning else None)
+
+
+def _buffered_stream(request_id: str, message: dict, finish_reason: str):
+    """Turn a finished completion into OpenAI chat.completion.chunk events.
+
+    Used when `tools` were sent: the full generation is collected first so
+    Qwen XML can be rewritten as `delta.tool_calls` instead of being streamed
+    as ordinary text that Hermes would treat as a finished answer.
+    """
+    yield _sse(_chunk(request_id, {"role": "assistant"}))
+
+    tool_calls = message.get("tool_calls")
+    content = message.get("content")
+    if tool_calls:
+        for index, call in enumerate(tool_calls):
+            yield _sse(
+                _chunk(
+                    request_id,
+                    {
+                        "tool_calls": [
+                            {
+                                "index": index,
+                                "id": call.get("id"),
+                                "type": call.get("type") or "function",
+                                "function": {
+                                    "name": call["function"]["name"],
+                                    "arguments": call["function"].get("arguments") or "",
+                                },
+                            }
+                        ]
+                    },
+                )
+            )
+    elif content:
+        yield _sse(_chunk(request_id, {"content": content}))
+
+    yield _sse(_chunk(request_id, {}, finish_reason=finish_reason))
+    yield "data: [DONE]\n\n"
 
 
 def register(app, llm) -> None:
@@ -99,75 +172,104 @@ def register(app, llm) -> None:
 
         strip_reasoning = _strip_reasoning_requested(request)
         request_id = "chatcmpl-" + uuid.uuid4().hex
+        parse_markup = bool(request.tools or request.functions)
+        # Live token streaming is only safe when we are not going to rewrite
+        # the output as tool_calls. With tools present, collect first.
+        live_stream = request.stream and not parse_markup
 
-        stream = generate(
+        if live_stream:
+            stream = generate(
+                llm,
+                request.messages,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                top_k=request.top_k,
+                max_tokens=request.max_tokens,
+            )
+
+            def event_stream():
+                buffer = ""
+                try:
+                    for piece in stream:
+                        buffer += piece
+                        if not strip_reasoning:
+                            yield _sse(
+                                _chunk(
+                                    request_id, {"role": "assistant", "content": piece}
+                                )
+                            )
+
+                    if strip_reasoning:
+                        _, answer = separate(buffer)
+                        yield _sse(
+                            _chunk(request_id, {"role": "assistant", "content": answer})
+                        )
+
+                    yield _sse(_chunk(request_id, {}, finish_reason="stop"))
+                    yield "data: [DONE]\n\n"
+
+                except Exception as error:  # surfaced to the client, not swallowed
+                    yield _sse(
+                        {"error": {"message": str(error), "type": type(error).__name__}}
+                    )
+                    yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                event_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        raw, tool_calls, finish_reason = collect(
             llm,
             request.messages,
             temperature=request.temperature,
             top_p=request.top_p,
             top_k=request.top_k,
             max_tokens=request.max_tokens,
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            functions=request.functions,
+            parse_markup=parse_markup,
         )
+        message, reasoning = _assistant_message(raw, tool_calls, strip_reasoning)
+        if not tool_calls:
+            finish_reason = "stop"
 
-        if not request.stream:
-            reasoning, answer = separate("".join(stream))
-
-            return {
-                "id": request_id,
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": config.model_id(),
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": answer},
-                        "finish_reason": "stop",
-                    }
-                ],
-                # Zeroed rather than omitted: streaming llama.cpp does not
-                # report token counts, and clients that reach for
-                # `response.usage.total_tokens` crash on a missing field.
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-                # Non-standard, and only populated when the caller asked for the
-                # reasoning to be separated out.
-                "reasoning_content": reasoning if strip_reasoning else None,
-            }
-
-        def event_stream():
-            buffer = ""
-            try:
-                for piece in stream:
-                    buffer += piece
-                    if not strip_reasoning:
-                        yield _sse(
-                            _chunk(request_id, {"role": "assistant", "content": piece})
-                        )
-
-                if strip_reasoning:
-                    _, answer = separate(buffer)
+        if request.stream:
+            def buffered_events():
+                try:
+                    yield from _buffered_stream(request_id, message, finish_reason)
+                except Exception as error:
                     yield _sse(
-                        _chunk(request_id, {"role": "assistant", "content": answer})
+                        {"error": {"message": str(error), "type": type(error).__name__}}
                     )
+                    yield "data: [DONE]\n\n"
 
-                yield _sse(_chunk(request_id, {}, finish_reason="stop"))
-                yield "data: [DONE]\n\n"
+            return StreamingResponse(
+                buffered_events(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
 
-            except Exception as error:  # surfaced to the client, not swallowed
-                yield _sse(
-                    {"error": {"message": str(error), "type": type(error).__name__}}
-                )
-                yield "data: [DONE]\n\n"
-
-        return StreamingResponse(
-            event_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                # Stops the share tunnel from buffering the stream into one blob.
-                "X-Accel-Buffering": "no",
-            },
-        )
+        return {
+            "id": request_id,
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": config.model_id(),
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finish_reason,
+                }
+            ],
+            "usage": _usage(),
+            "reasoning_content": reasoning,
+        }

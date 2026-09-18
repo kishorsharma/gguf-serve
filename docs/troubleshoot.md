@@ -127,3 +127,14 @@ Also confirm `--ctx` is not above the model's own trained context length, which 
 Expected on streaming requests: the server streams raw output and the client separates the sections. See [api.md](api.md) for why, and for how to opt into server-side stripping.
 
 If a non-reasoning model emits `</think>` as genuine content and gguf-serve swallows part of the answer, disable the parser with `--no-reasoning`.
+
+## Hermes (or any agent) says it will use tools, then stops
+
+That is `finish_reason: "stop"` and `tool_calls: null` after a sentence like "I'll inspect the repository". Two things have to happen for tool calling to work:
+
+1. The client must send `tools` on `POST /v1/chat/completions`. Without that, the GGUF chat template never sees the tool schemas, so Qwen writes ordinary prose instead of a call.
+2. This server must return that call as OpenAI `tool_calls`, not as `<tool_call>` text in `content`. llama-cpp-python does the first half (prompt) and not the second (parse); gguf-serve rewrites the XML.
+
+If you still get prose after a restart with this code, the GGUF's chat template likely has no tools branch. Merged/custom Qwen GGUFs do this more often than official ones. Try an official Qwen GGUF before changing Hermes, Cloudflare, or GPU settings.
+
+A raw request is the right check — see the tool-calling example in [api.md](api.md). You want `finish_reason: "tool_calls"` and a `tool_calls` array, not a sentence about using tools.

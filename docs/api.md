@@ -63,6 +63,8 @@ Two caveats:
 | `top_k` | int | `20` | Not in the OpenAI spec; llama.cpp supports it |
 | `max_tokens` | int | `2048` | |
 | `stream` | bool | `false` | Server-sent events when true |
+| `tools` | array | `null` | OpenAI function tools. Forwarded to llama.cpp and required for Hermes-style tool calling |
+| `tool_choice` | string or object | `null` | `"auto"`, `"none"`, `"required"`, or a named function |
 | `extra_body` | object | `null` | Carries `chat_template_kwargs.enable_thinking` |
 
 Defaults come from `ggufserve/config.py`, so they follow whatever you set there.
@@ -70,6 +72,35 @@ Defaults come from `ggufserve/config.py`, so they follow whatever you set there.
 Streaming responses are `text/event-stream`, one `data:` line per chunk, terminated by `data: [DONE]`. Errors mid-stream arrive as a chunk containing an `error` object rather than a dropped connection, because the HTTP status has already been sent by then.
 
 Token usage is reported as zeros. Streaming llama.cpp does not return counts, and inventing estimates would be worse than an obvious placeholder. The field is present rather than omitted because clients that read `response.usage.total_tokens` crash on a missing one.
+
+### Tool calling
+
+Send `tools` the same way you would to OpenAI. If the model emits a call, the response has `finish_reason: "tool_calls"` and `message.tool_calls` (or `delta.tool_calls` when streaming).
+
+Qwen GGUFs usually write calls as `<tool_call>{...}</tool_call>` text. llama-cpp-python leaves that in `content`; this server rewrites it into OpenAI `tool_calls` so clients such as Hermes actually execute the tool instead of treating the reply as a finished answer.
+
+Without `tools` on the request, markup is left as content and `finish_reason` stays `"stop"`.
+
+```bash
+curl https://YOUR-ID.gradio.live/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Use the shell tool to run: pwd"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "shell",
+        "description": "Execute a shell command",
+        "parameters": {
+          "type": "object",
+          "properties": {"command": {"type": "string"}},
+          "required": ["command"]
+        }
+      }
+    }],
+    "stream": false
+  }'
+```
 
 ### Examples
 

@@ -52,7 +52,7 @@ N_UBATCH = 512
 # what makes the longest contexts fit at all — see docs/configuration.md for the
 # numbers. It needs a llama.cpp build with flash attention for your GPU, which
 # gguf-serve enables automatically when you select it.
-KV_CACHE_TYPE = "f16"
+KV_CACHE_TYPE = "q8_0"
 
 # -1 offloads every layer to the GPU. Lower it to keep some layers on the CPU
 # when a model is slightly too big for your VRAM.
@@ -76,6 +76,9 @@ TEMPERATURE = 1.0
 TOP_P = 0.95
 TOP_K = 20
 MAX_TOKENS = 2048
+
+N_THREADS: int | None = None   # number of CPU threads for llama.cpp prompt processing; None = auto
+N_THREADS_BATCH: int | None = None   # batch threads; if None, equals N_THREADS
 
 # ---------------------------------------------------------------------------
 # Reasoning models

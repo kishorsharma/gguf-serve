@@ -32,7 +32,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ggufserve import api, chat, config, model, server, system, webui
-from ggufserve.chat import split_response
+from ggufserve.chat import extract_tool_calls, split_response
 import launch
 from launch import _count_steps, _parse_split
 
@@ -45,6 +45,26 @@ RAW = f"{REASONING}\n</think>\n\n{ANSWER}"
 FRAGMENTS = [f"{REASONING}\n</thi", "nk>\n\n17 x 23 ", "= **391**."]
 
 
+SHELL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "shell",
+        "description": "Execute a shell command",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    },
+}
+
+SHELL_XML = (
+    '<tool_call>\n'
+    '{"name": "shell", "arguments": {"command": "pwd"}}\n'
+    "</tool_call>"
+)
+
+
 class StubLlama:
     """Stands in for llama_cpp.Llama.create_chat_completion(stream=True)."""
 
@@ -52,19 +72,29 @@ class StubLlama:
         self.calls: list[dict] = []
         self._active = 0
         self.max_concurrent = 0
+        self.chunks: list[dict] | None = None
 
     def create_chat_completion(self, **kwargs):
         self.calls.append(kwargs)
         assert kwargs["stream"] is True, "generation must always stream"
+
+        script = self.chunks
+        self.chunks = None
 
         self._active += 1
         self.max_concurrent = max(self.max_concurrent, self._active)
 
         def chunks():
             try:
-                for fragment in FRAGMENTS:
+                sequence = script
+                if sequence is None:
+                    sequence = [
+                        {"choices": [{"delta": {"content": fragment}}]}
+                        for fragment in FRAGMENTS
+                    ]
+                for item in sequence:
                     time.sleep(0.02)  # widen the window for a lock race
-                    yield {"choices": [{"delta": {"content": fragment}}]}
+                    yield item
             finally:
                 self._active -= 1
 
@@ -293,6 +323,168 @@ def main() -> int:
     check("top_k reaches the model", call["top_k"] == 5, str(call))
     check("max_tokens reaches the model", call["max_tokens"] == 33, str(call))
 
+    check.section("tool calling")
+    client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "pwd"}],
+            "tools": [SHELL_TOOL],
+            "tool_choice": "auto",
+        },
+    )
+    call = llm.calls[-1]
+    check("tools reach the model", call.get("tools") == [SHELL_TOOL], str(call.get("tools")))
+    check("tool_choice reaches the model", call.get("tool_choice") == "auto", str(call.get("tool_choice")))
+
+    llm.chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_shell",
+                                "type": "function",
+                                "function": {"name": "shell", "arguments": ""},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "function": {"arguments": '{"command": "pwd"}'}}
+                        ]
+                    }
+                }
+            ]
+        },
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+    body = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "pwd"}],
+            "tools": [SHELL_TOOL],
+        },
+    ).json()
+    message = body["choices"][0]["message"]
+    check(
+        "structured tool_calls are returned",
+        (message.get("tool_calls") or [{}])[0].get("function", {}).get("name") == "shell",
+        repr(message.get("tool_calls")),
+    )
+    check(
+        "arguments stay a JSON string",
+        (message.get("tool_calls") or [{}])[0].get("function", {}).get("arguments")
+        == '{"command": "pwd"}',
+        repr(message.get("tool_calls")),
+    )
+    check(
+        "finish_reason is tool_calls",
+        body["choices"][0]["finish_reason"] == "tool_calls",
+        body["choices"][0]["finish_reason"],
+    )
+    check("content is null when only a tool call was produced", message.get("content") is None)
+
+    llm.chunks = [{"choices": [{"delta": {"content": SHELL_XML}}]}]
+    body = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "pwd"}],
+            "tools": [SHELL_TOOL],
+        },
+    ).json()
+    message = body["choices"][0]["message"]
+    parsed_args = (message.get("tool_calls") or [{}])[0].get("function", {}).get("arguments")
+    check(
+        "Qwen <tool_call> XML is converted to tool_calls",
+        (message.get("tool_calls") or [{}])[0].get("function", {}).get("name") == "shell",
+        repr(message.get("tool_calls")),
+    )
+    check(
+        "XML arguments are stringified JSON",
+        parsed_args == '{"command": "pwd"}',
+        repr(parsed_args),
+    )
+    check(
+        "XML conversion sets finish_reason tool_calls",
+        body["choices"][0]["finish_reason"] == "tool_calls",
+    )
+
+    llm.chunks = [{"choices": [{"delta": {"content": SHELL_XML}}]}]
+    body = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "pwd"}]},
+    ).json()
+    check(
+        "without tools, XML stays in content",
+        SHELL_XML in (body["choices"][0]["message"]["content"] or ""),
+        repr(body["choices"][0]["message"]["content"]),
+    )
+    check(
+        "without tools, finish_reason stays stop",
+        body["choices"][0]["finish_reason"] == "stop",
+    )
+    check("without tools, tool_calls are absent", "tool_calls" not in body["choices"][0]["message"])
+
+    llm.chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_stream",
+                                "type": "function",
+                                "function": {
+                                    "name": "shell",
+                                    "arguments": '{"command": "pwd"}',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+    streamed_calls, stream_finish, stream_done = [], None, False
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "pwd"}],
+            "tools": [SHELL_TOOL],
+            "stream": True,
+        },
+    ) as response:
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                stream_done = True
+                continue
+            chunk = json.loads(payload)
+            streamed_calls.extend(
+                chunk["choices"][0]["delta"].get("tool_calls") or []
+            )
+            stream_finish = chunk["choices"][0]["finish_reason"] or stream_finish
+    check(
+        "streaming emits delta.tool_calls",
+        any(call.get("function", {}).get("name") == "shell" for call in streamed_calls),
+        repr(streamed_calls),
+    )
+    check("streaming finish_reason is tool_calls", stream_finish == "tool_calls")
+    check("tool-call stream ends with [DONE]", stream_done)
+
     check.section("streaming completion")
     streamed, events, done, finish = "", 0, False, None
     with client.stream(
@@ -346,6 +538,38 @@ def main() -> int:
         "a model with no reasoning tags is unaffected",
         chat.separate("Just an answer.") == ("", "Just an answer."),
     )
+
+    parsed, leftover = extract_tool_calls(SHELL_XML)
+    check("JSON inside <tool_call> parses", parsed and parsed[0]["function"]["name"] == "shell")
+    check("parsed arguments are a JSON string", parsed[0]["function"]["arguments"] == '{"command": "pwd"}')
+    check("markup is removed from leftover text", leftover == "")
+
+    doubled = '<tool_call>\n{{"name": "shell", "arguments": {"command": "ls"}}}\n</tool_call>'
+    parsed, _ = extract_tool_calls(doubled)
+    check(
+        "doubled JSON braces still parse",
+        parsed and json.loads(parsed[0]["function"]["arguments"]) == {"command": "ls"},
+        repr(parsed),
+    )
+
+    qwen_xml = (
+        "<function=shell>\n"
+        "<parameter=command>\npwd\n</parameter>\n"
+        "</function>"
+    )
+    parsed, leftover = extract_tool_calls(qwen_xml)
+    check(
+        "Qwen <function=name> XML parses",
+        parsed and parsed[0]["function"]["name"] == "shell",
+        repr(parsed),
+    )
+    check(
+        "function XML arguments round-trip",
+        parsed and json.loads(parsed[0]["function"]["arguments"]) == {"command": "pwd"},
+    )
+
+    none, original = extract_tool_calls("I will inspect the repository.")
+    check("prose without markup is left alone", none == [] and original == "I will inspect the repository.")
 
     check.section("model file validation")
     with tempfile.TemporaryDirectory() as tmp:

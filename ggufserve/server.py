@@ -9,6 +9,7 @@ second tunnel to expose.
 from __future__ import annotations
 
 import socket
+import signal
 import time
 from pathlib import Path
 
@@ -100,10 +101,10 @@ def launch(app, port: int, share: bool, model_path: Path | None = None) -> None:
     print_summary(port=port, share_url=_share_url(result), model_path=model_path)
 
     try:
-        while True:
-            time.sleep(1)
+        # Wait for a signal without busy loop
+        signal.pause()
     except KeyboardInterrupt:
-        print("\nShutting down.")
+        print("\\nShutting down.")
 
 
 def _share_url(launch_result) -> str | None:

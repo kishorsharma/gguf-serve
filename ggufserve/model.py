@@ -256,7 +256,13 @@ def load(path: Path):
         f"   context {config.CTX_SIZE:,}, gpu_layers {config.N_GPU_LAYERS}, "
         f"tensor_split {tensor_split}, kv cache {kv_type}"
     )
-    threads = max(4, os.cpu_count() or 4)
+    # Determine thread counts for llama.cpp
+    if config.N_THREADS is not None:
+        n_threads = config.N_THREADS
+        n_threads_batch = config.N_THREADS_BATCH if config.N_THREADS_BATCH is not None else config.N_THREADS
+    else:
+        n_threads = max(4, os.cpu_count() or 4)
+        n_threads_batch = n_threads
 
     extra = {}
     if kv_type != "f16":
@@ -282,8 +288,8 @@ def load(path: Path):
                 n_batch=config.N_BATCH,
                 n_ubatch=config.N_UBATCH,
                 offload_kqv=config.OFFLOAD_KQV,
-                n_threads=threads,
-                n_threads_batch=threads,
+                n_threads=n_threads,
+                n_threads_batch=n_threads_batch,
                 verbose=config.VERBOSE,
                 **extra,
             )
