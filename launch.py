@@ -124,6 +124,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "failures are reported, so use it when a load dies without saying why",
     )
     behaviour.add_argument(
+        "--chat-log",
+        action="store_true",
+        help="print per-request chat traces (tool argument types, parsed "
+        "tool_calls, Jinja errors) to stdout; useful on Kaggle",
+    )
+    behaviour.add_argument(
         "--no-reasoning",
         action="store_true",
         help="pass model output through untouched instead of splitting off "
@@ -213,6 +219,7 @@ def main(argv: list[str] | None = None) -> None:
     config.KV_CACHE_TYPE = args.kv_cache_type
     config.TENSOR_SPLIT = _parse_split(args.tensor_split)
     config.VERBOSE = args.verbose
+    config.CHAT_LOG = args.chat_log
     if args.no_reasoning:
         config.PARSE_REASONING = False
 

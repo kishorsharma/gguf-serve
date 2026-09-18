@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import re
 import threading
+import traceback
 import uuid
 from dataclasses import dataclass
 from typing import Any, Iterator
 
 from ggufserve import config
-from ggufserve.system import heartbeat, info, ok, step
+from ggufserve.system import heartbeat, info, ok, step, warn
 
 THINK_END = "</think>"
 THINK_START = "<think>"
@@ -124,6 +125,214 @@ def extract_tool_calls(text: str) -> tuple[list[dict[str, Any]], str]:
     return [_openai_tool_call(call) for call in calls], remaining
 
 
+def _as_mapping(value: Any) -> Any:
+    """JSON-decode OpenAI tool argument strings so Qwen's template can |items them.
+
+    Qwen3.8's chat template does `tool_call.arguments|items`. That needs a
+    mapping. Hermes/OpenAI send `function.arguments` as a JSON string, and
+    llama-cpp-python renders the GGUF template as-is — which raises
+    `Can only get item pairs from a mapping.`
+    """
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return value
+        return parsed if isinstance(parsed, dict) else value
+    return value
+
+
+def prepare_tools_for_template(tools: Any) -> Any:
+    """Make sure `tools` is a list of dicts with mapping `parameters`."""
+    if not tools:
+        return tools
+    if isinstance(tools, str):
+        tools = _as_mapping(tools)
+    if isinstance(tools, dict):
+        tools = [tools]
+    if not isinstance(tools, list):
+        return tools
+    prepared = []
+    for tool in tools:
+        if isinstance(tool, str):
+            tool = _as_mapping(tool)
+        if not isinstance(tool, dict):
+            continue
+        tool = dict(tool)
+        function = tool.get("function")
+        if isinstance(function, dict):
+            function = dict(function)
+            parameters = function.get("parameters")
+            mapped = _as_mapping(parameters) if parameters is not None else parameters
+            if isinstance(mapped, dict):
+                function["parameters"] = mapped
+            tool["function"] = function
+        prepared.append(tool)
+    return prepared
+
+
+def prepare_messages_for_template(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Turn OpenAI JSON-string tool arguments into mappings for the chat template."""
+    prepared: list[dict[str, Any]] = []
+    for original in messages:
+        message = dict(original)
+        calls = message.get("tool_calls")
+        if not calls:
+            prepared.append(message)
+            continue
+        if isinstance(calls, str):
+            try:
+                calls = json.loads(calls)
+            except json.JSONDecodeError:
+                prepared.append(message)
+                continue
+        if not isinstance(calls, list):
+            prepared.append(message)
+            continue
+        rewritten = []
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            call = dict(call)
+            function = call.get("function")
+            if isinstance(function, dict):
+                function = dict(function)
+                mapped = _as_mapping(function.get("arguments"))
+                function["arguments"] = mapped if isinstance(mapped, dict) else {}
+                call["function"] = function
+            elif "arguments" in call:
+                mapped = _as_mapping(call.get("arguments"))
+                call["arguments"] = mapped if isinstance(mapped, dict) else {}
+            rewritten.append(call)
+        message["tool_calls"] = rewritten
+        prepared.append(message)
+    return prepared
+
+
+def _kind(value: Any) -> str:
+    if value is None:
+        return "none"
+    if isinstance(value, dict):
+        return "dict"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, str):
+        return "str"
+    return type(value).__name__
+
+
+def describe_arg_types(messages: list[dict[str, Any]]) -> list[str]:
+    """Compact `msg[i].name.arguments=str|dict` labels for Kaggle logs."""
+    labels: list[str] = []
+    for index, message in enumerate(messages):
+        calls = message.get("tool_calls")
+        if not calls:
+            continue
+        if not isinstance(calls, list):
+            labels.append(f"msg[{index}].tool_calls={_kind(calls)}")
+            continue
+        role = message.get("role") or "?"
+        for call in calls:
+            if not isinstance(call, dict):
+                labels.append(f"msg[{index}].tool_calls={_kind(call)}")
+                continue
+            function = call.get("function")
+            if isinstance(function, dict):
+                name = function.get("name") or "?"
+                labels.append(
+                    f"msg[{index}].{role}.{name}.arguments="
+                    f"{_kind(function.get('arguments'))}"
+                )
+            else:
+                labels.append(
+                    f"msg[{index}].{role}.arguments={_kind(call.get('arguments'))}"
+                )
+    return labels
+
+
+def _tool_names(tools: Any) -> list[str]:
+    if not tools:
+        return []
+    if isinstance(tools, dict):
+        tools = [tools]
+    names: list[str] = []
+    if not isinstance(tools, list):
+        return [f"tools={_kind(tools)}"]
+    for tool in tools:
+        if isinstance(tool, dict):
+            function = tool.get("function")
+            if isinstance(function, dict):
+                names.append(str(function.get("name") or "?"))
+            else:
+                names.append(str(tool.get("name") or "?"))
+        else:
+            names.append(_kind(tool))
+    return names
+
+
+def _role_labels(messages: list[dict[str, Any]]) -> str:
+    labels = []
+    for message in messages:
+        role = str(message.get("role") or "?")
+        if message.get("tool_calls"):
+            role += "+tools"
+        labels.append(role)
+    return ",".join(labels)
+
+
+def _preview(text: str, limit: int = 160) -> str:
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 3] + "..."
+
+
+def _call_names(calls: list[dict[str, Any]] | None) -> list[str]:
+    names: list[str] = []
+    for call in calls or []:
+        function = call.get("function") if isinstance(call, dict) else None
+        if isinstance(function, dict):
+            names.append(str(function.get("name") or "?"))
+        elif isinstance(call, dict):
+            names.append(str(call.get("name") or "?"))
+    return names
+
+
+def _chat_info(text: str) -> None:
+    if config.CHAT_LOG:
+        info(text)
+
+
+def _chat_warn(text: str) -> None:
+    if config.CHAT_LOG:
+        warn(text)
+
+
+def _log_llama_error(error: BaseException, messages: list[dict[str, Any]]) -> None:
+    if not config.CHAT_LOG:
+        return
+    warn(f"llama.cpp failed: {type(error).__name__}: {error}")
+    leftover = [item for item in describe_arg_types(messages) if item.endswith("=str")]
+    if leftover:
+        warn(f"template still has string arguments: {', '.join(leftover)}")
+    text = str(error).lower()
+    if "item pairs" in text or "mapping" in text:
+        warn(
+            "Jinja |items needs dict arguments, not JSON strings "
+            "(Qwen chat template vs OpenAI tool_calls)"
+        )
+    traceback.print_exc()
+
+
 def complete(
     llm,
     messages: list[dict[str, Any]],
@@ -136,16 +345,35 @@ def complete(
     functions: list[dict[str, Any]] | None = None,
 ) -> Iterator[ChatDelta]:
     """Stream chat deltas, holding the inference lock throughout."""
+    prepared_messages = prepare_messages_for_template(messages)
+    prepared_tools = prepare_tools_for_template(tools) if tools else tools
+    if config.CHAT_LOG:
+        incoming = describe_arg_types(messages)
+        outgoing = describe_arg_types(prepared_messages)
+        _chat_info(
+            f"chat in : {len(messages)} msgs [{_role_labels(messages)}] "
+            f"tools={_tool_names(tools) or '-'} choice={tool_choice!r}"
+        )
+        if incoming or outgoing:
+            _chat_info(
+                f"chat args in : {incoming or '-'} -> template {outgoing or '-'}"
+            )
+            leftover = [item for item in outgoing if item.endswith("=str")]
+            if leftover:
+                _chat_warn(
+                    f"string arguments still present; Jinja |items will fail: {leftover}"
+                )
+
     params: dict[str, Any] = {
-        "messages": messages,
+        "messages": prepared_messages,
         "temperature": float(config.TEMPERATURE if temperature is None else temperature),
         "top_p": float(config.TOP_P if top_p is None else top_p),
         "top_k": int(config.TOP_K if top_k is None else top_k),
         "max_tokens": int(config.MAX_TOKENS if max_tokens is None else max_tokens),
         "stream": True,
     }
-    if tools:
-        params["tools"] = tools
+    if prepared_tools:
+        params["tools"] = prepared_tools
     if tool_choice is not None:
         params["tool_choice"] = tool_choice
     if functions:
@@ -156,19 +384,28 @@ def complete(
     # `enable_thinking` cannot be forwarded. Reasoning is always generated and
     # stripped afterwards.
     with _lock:
-        for chunk in llm.create_chat_completion(**params):
-            choice = (chunk.get("choices") or [{}])[0]
-            delta = choice.get("delta") or {}
-            content = delta.get("content") or ""
-            tool_calls = delta.get("tool_calls") or None
-            finish_reason = choice.get("finish_reason")
-            if not content and not tool_calls and not finish_reason:
-                continue
-            yield ChatDelta(
-                content=content,
-                tool_calls=tool_calls,
-                finish_reason=finish_reason,
-            )
+        try:
+            stream = llm.create_chat_completion(**params)
+        except Exception as error:
+            _log_llama_error(error, prepared_messages)
+            raise
+        try:
+            for chunk in stream:
+                choice = (chunk.get("choices") or [{}])[0]
+                delta = choice.get("delta") or {}
+                content = delta.get("content") or ""
+                tool_calls = delta.get("tool_calls") or None
+                finish_reason = choice.get("finish_reason")
+                if not content and not tool_calls and not finish_reason:
+                    continue
+                yield ChatDelta(
+                    content=content,
+                    tool_calls=tool_calls,
+                    finish_reason=finish_reason,
+                )
+        except Exception as error:
+            _log_llama_error(error, prepared_messages)
+            raise
 
 
 def collect(
@@ -215,13 +452,25 @@ def collect(
     raw = "".join(parts)
     merged = _merge_tool_call_deltas(tool_deltas)
     if merged:
+        _chat_info(
+            f"chat out: finish=tool_calls names={_call_names(merged)} "
+            f"via=openai-delta content={_preview(raw)!r}"
+        )
         return raw, merged, "tool_calls"
 
     if parse_markup:
         parsed, remainder = extract_tool_calls(raw)
         if parsed:
+            _chat_info(
+                f"chat out: finish=tool_calls names={_call_names(parsed)} "
+                f"via=qwen-xml content={_preview(remainder)!r}"
+            )
             return remainder, parsed, "tool_calls"
 
+    _chat_info(
+        f"chat out: finish={finish or 'stop'} names=[] via=text "
+        f"content={_preview(raw)!r}"
+    )
     return raw, None, finish or "stop"
 
 
@@ -285,11 +534,20 @@ def iter_client_events(
     parsed, _remainder = extract_tool_calls(raw)
     calls = merged or parsed
     if calls:
+        via = "openai-delta" if merged else "qwen-xml"
+        _chat_info(
+            f"chat out: finish=tool_calls names={_call_names(calls)} "
+            f"via={via} content={_preview(raw)!r}"
+        )
         yield ChatDelta(tool_calls=calls, finish_reason="tool_calls")
         return
     leftover = take(len(raw))
     if leftover:
         yield ChatDelta(content=leftover)
+    _chat_info(
+        f"chat out: finish={finish or 'stop'} names=[] via=text "
+        f"content={_preview(raw)!r}"
+    )
     yield ChatDelta(finish_reason=finish or "stop")
 
 

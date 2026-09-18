@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import time
+import traceback
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +24,7 @@ from pydantic import BaseModel
 
 from ggufserve import config
 from ggufserve.chat import collect, iter_client_events, separate
+from ggufserve.system import warn
 
 
 class ChatCompletionRequest(BaseModel):
@@ -200,6 +202,9 @@ def register(app, llm) -> None:
                         )
                         yield "data: [DONE]\n\n"
                     except Exception as error:
+                        if config.CHAT_LOG:
+                            warn(f"chat {request_id}: {type(error).__name__}: {error}")
+                            traceback.print_exc()
                         yield _sse(
                             {
                                 "error": {
@@ -241,6 +246,9 @@ def register(app, llm) -> None:
                             )
                     yield "data: [DONE]\n\n"
                 except Exception as error:
+                    if config.CHAT_LOG:
+                        warn(f"chat {request_id}: {type(error).__name__}: {error}")
+                        traceback.print_exc()
                     yield _sse(
                         {"error": {"message": str(error), "type": type(error).__name__}}
                     )
@@ -248,17 +256,31 @@ def register(app, llm) -> None:
 
             return _sse_response(event_stream())
 
-        raw, tool_calls, finish_reason = collect(
-            llm,
-            request.messages,
-            temperature=request.temperature,
-            top_p=request.top_p,
-            top_k=request.top_k,
-            max_tokens=request.max_tokens,
-            tools=request.tools,
-            tool_choice=request.tool_choice,
-            functions=request.functions,
-        )
+        try:
+            raw, tool_calls, finish_reason = collect(
+                llm,
+                request.messages,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                top_k=request.top_k,
+                max_tokens=request.max_tokens,
+                tools=request.tools,
+                tool_choice=request.tool_choice,
+                functions=request.functions,
+            )
+        except Exception as error:
+            if config.CHAT_LOG:
+                warn(f"chat {request_id}: {type(error).__name__}: {error}")
+                traceback.print_exc()
+            return JSONResponse(
+                {
+                    "error": {
+                        "message": str(error),
+                        "type": type(error).__name__,
+                    }
+                },
+                status_code=500,
+            )
         message, reasoning = _assistant_message(raw, tool_calls, strip_reasoning)
         if not tool_calls:
             finish_reason = "stop"

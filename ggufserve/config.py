@@ -71,6 +71,10 @@ OFFLOAD_KQV = True
 # reported, so turn it on when a load dies without saying why.
 VERBOSE = False
 
+# Per-request chat traces: roles, tool argument types, XML vs OpenAI tool_calls,
+# and Jinja mapping failures. Off by default; Hermes traffic is chatty.
+CHAT_LOG = False
+
 # Sampling defaults, applied when a request does not override them.
 TEMPERATURE = 1.0
 TOP_P = 0.95

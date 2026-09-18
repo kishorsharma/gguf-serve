@@ -33,7 +33,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ggufserve import api, chat, config, installer, model, server, system, webui
-from ggufserve.chat import extract_tool_calls, split_response
+from ggufserve.chat import (
+    describe_arg_types,
+    extract_tool_calls,
+    prepare_messages_for_template,
+    prepare_tools_for_template,
+    split_response,
+)
 import launch
 from launch import _count_steps, _parse_split
 
@@ -344,6 +350,99 @@ def main() -> int:
     call = llm.calls[-1]
     check("tools reach the model", call.get("tools") == [SHELL_TOOL], str(call.get("tools")))
     check("tool_choice reaches the model", call.get("tool_choice") == "auto", str(call.get("tool_choice")))
+
+    client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "pwd"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_shell",
+                            "type": "function",
+                            "function": {
+                                "name": "shell",
+                                "arguments": '{"command": "pwd"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_shell",
+                    "content": "/kaggle/working",
+                },
+            ],
+            "tools": [SHELL_TOOL],
+        },
+    )
+    forwarded = (
+        llm.calls[-1]["messages"][1]["tool_calls"][0]["function"]["arguments"]
+    )
+    check(
+        "OpenAI argument strings become mappings before llama.cpp",
+        forwarded == {"command": "pwd"},
+        repr(forwarded),
+    )
+
+    def exploding():
+        raise TypeError("Can only get item pairs from a mapping.")
+        yield {}
+
+    llm.chunks = exploding()
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        boom = _with_config(
+            CHAT_LOG=True,
+            fn=lambda: client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [
+                        {"role": "user", "content": "pwd"},
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_shell",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "shell",
+                                        "arguments": '{"command": "pwd"}',
+                                    },
+                                }
+                            ],
+                        },
+                    ],
+                    "tools": [SHELL_TOOL],
+                },
+            ),
+        )
+    logged = buffer.getvalue()
+    check("mapping errors return 500 JSON", boom.status_code == 500, boom.text)
+    check(
+        "mapping errors are printed for Kaggle",
+        "item pairs from a mapping" in logged,
+        logged[:500],
+    )
+    check(
+        "Jinja hint is printed",
+        "Jinja |items" in logged,
+        logged[:500],
+    )
+    check(
+        "incoming string arguments are labeled",
+        "arguments=str" in logged,
+        logged[:500],
+    )
+    quiet = _captured(
+        lambda: client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+    )
+    check("chat traces are off by default", "chat in :" not in quiet, quiet[:400])
 
     llm.chunks = [
         {
@@ -670,6 +769,93 @@ def main() -> int:
     none, original = extract_tool_calls("I will inspect the repository.")
     check("prose without markup is left alone", none == [] and original == "I will inspect the repository.")
 
+    prepared = prepare_messages_for_template(
+        [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "web_search",
+                            "arguments": '{"query": "x"}',
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+    check(
+        "string arguments become a dict for Jinja |items",
+        prepared[0]["tool_calls"][0]["function"]["arguments"] == {"query": "x"},
+        repr(prepared[0]["tool_calls"][0]["function"]["arguments"]),
+    )
+    check(
+        "empty argument string becomes {}",
+        prepare_messages_for_template(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"function": {"name": "shell", "arguments": ""}}
+                    ],
+                }
+            ]
+        )[0]["tool_calls"][0]["function"]["arguments"]
+        == {},
+    )
+    already = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"function": {"name": "shell", "arguments": {"command": "ls"}}}
+            ],
+        }
+    ]
+    check(
+        "dict arguments pass through",
+        prepare_messages_for_template(already)[0]["tool_calls"][0]["function"][
+            "arguments"
+        ]
+        == {"command": "ls"},
+    )
+    string_tools = prepare_tools_for_template(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "shell",
+                    "parameters": '{"type": "object"}',
+                },
+            }
+        ]
+    )
+    check(
+        "tool parameters JSON string becomes a mapping",
+        string_tools[0]["function"]["parameters"] == {"type": "object"},
+        repr(string_tools[0]["function"]["parameters"]),
+    )
+    check(
+        "string arguments are labeled str",
+        describe_arg_types(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "web_search",
+                                "arguments": '{"query": "x"}',
+                            }
+                        }
+                    ],
+                }
+            ]
+        )
+        == ["msg[0].assistant.web_search.arguments=str"],
+    )
+
     check.section("model file validation")
     with tempfile.TemporaryDirectory() as tmp:
         good = Path(tmp) / "good.gguf"
@@ -909,6 +1095,7 @@ def main() -> int:
         "SHARE": config.SHARE,
         "PARSE_REASONING": config.PARSE_REASONING,
         "VERBOSE": config.VERBOSE,
+        "CHAT_LOG": config.CHAT_LOG,
     }
     check("every setting was found in the cell", set(expected) <= set(settings))
     for name, value in expected.items():
