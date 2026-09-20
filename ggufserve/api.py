@@ -13,17 +13,20 @@ without a `tools` array on the request — the server rewrites it into OpenAI
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import traceback
 import uuid
-from typing import Any, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 
+from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ggufserve import config
-from ggufserve.chat import collect, iter_client_events, separate
+from ggufserve.chat import close_iterator, collect, iter_client_events, separate
 from ggufserve.system import warn
 
 
@@ -116,6 +119,45 @@ def _sse_response(iterator) -> StreamingResponse:
     )
 
 
+async def _abort_on_disconnect(
+    http_request: Request, iterator: Iterator[str]
+) -> AsyncIterator[str]:
+    """Stop llama.cpp when Hermes hits stop / the client drops the stream.
+
+    A sync StreamingResponse keeps sampling after the socket dies, holding the
+    inference lock. Later requests then queue behind a dead client until they
+    time out — which looks like the model 'rejecting everything' after cancel.
+    """
+    loop = asyncio.get_running_loop()
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gguf-chat")
+
+    def pull() -> str | None:
+        try:
+            return next(iterator)
+        except StopIteration:
+            return None
+
+    try:
+        while True:
+            if await http_request.is_disconnected():
+                if config.CHAT_LOG:
+                    warn("client disconnected; aborting generation")
+                break
+            chunk = await loop.run_in_executor(pool, pull)
+            if chunk is None:
+                break
+            yield chunk
+            if await http_request.is_disconnected():
+                if config.CHAT_LOG:
+                    warn("client disconnected; aborting generation")
+                break
+    finally:
+        try:
+            await loop.run_in_executor(pool, close_iterator, iterator)
+        finally:
+            pool.shutdown(wait=True)
+
+
 def register(app, llm) -> None:
     """Attach `/health`, `/v1/models` and `/v1/chat/completions` to `app`."""
 
@@ -148,7 +190,7 @@ def register(app, llm) -> None:
     # stall the event loop for the whole request and make every other route,
     # including /health, hang until generation finished.
     @app.post("/v1/chat/completions", tags=["openai"])
-    def chat_completions(request: ChatCompletionRequest):
+    def chat_completions(request: ChatCompletionRequest, http_request: Request):
         if not request.messages:
             return JSONResponse(
                 {
@@ -218,9 +260,10 @@ def register(app, llm) -> None:
                 return _sse_response(buffered_events())
 
             def event_stream():
+                events = None
                 try:
                     yield _sse(_chunk(request_id, {"role": "assistant"}))
-                    for event in iter_client_events(
+                    events = iter_client_events(
                         llm,
                         request.messages,
                         temperature=request.temperature,
@@ -230,7 +273,8 @@ def register(app, llm) -> None:
                         tools=request.tools,
                         tool_choice=request.tool_choice,
                         functions=request.functions,
-                    ):
+                    )
+                    for event in events:
                         delta: dict[str, Any] = {}
                         if event.content:
                             delta["content"] = event.content
@@ -253,8 +297,10 @@ def register(app, llm) -> None:
                         {"error": {"message": str(error), "type": type(error).__name__}}
                     )
                     yield "data: [DONE]\n\n"
+                finally:
+                    close_iterator(events)
 
-            return _sse_response(event_stream())
+            return _sse_response(_abort_on_disconnect(http_request, event_stream()))
 
         try:
             raw, tool_calls, finish_reason = collect(

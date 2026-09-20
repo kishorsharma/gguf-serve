@@ -317,6 +317,29 @@ def _chat_warn(text: str) -> None:
         warn(text)
 
 
+def close_iterator(iterator: Any) -> None:
+    """Close a generator so its `finally` runs (lock release, llama.cpp reset)."""
+    if iterator is None:
+        return
+    close = getattr(iterator, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception:
+        pass
+
+
+def _reset_llama(llm) -> None:
+    reset = getattr(llm, "reset", None)
+    if not callable(reset):
+        return
+    try:
+        reset()
+    except Exception as error:
+        _chat_warn(f"llama.cpp reset failed: {type(error).__name__}: {error}")
+
+
 def _log_llama_error(error: BaseException, messages: list[dict[str, Any]]) -> None:
     if not config.CHAT_LOG:
         return
@@ -384,12 +407,10 @@ def complete(
     # `enable_thinking` cannot be forwarded. Reasoning is always generated and
     # stripped afterwards.
     with _lock:
+        stream = None
+        finished = False
         try:
             stream = llm.create_chat_completion(**params)
-        except Exception as error:
-            _log_llama_error(error, prepared_messages)
-            raise
-        try:
             for chunk in stream:
                 choice = (chunk.get("choices") or [{}])[0]
                 delta = choice.get("delta") or {}
@@ -403,9 +424,15 @@ def complete(
                     tool_calls=tool_calls,
                     finish_reason=finish_reason,
                 )
+            finished = True
         except Exception as error:
             _log_llama_error(error, prepared_messages)
             raise
+        finally:
+            close_iterator(stream)
+            if not finished:
+                _chat_warn("chat aborted; resetting llama.cpp context")
+                _reset_llama(llm)
 
 
 def collect(
@@ -431,7 +458,7 @@ def collect(
     tool_deltas: list[list[dict[str, Any]]] = []
     finish = "stop"
 
-    for event in complete(
+    stream = complete(
         llm,
         messages,
         temperature=temperature,
@@ -441,13 +468,17 @@ def collect(
         tools=tools,
         tool_choice=tool_choice,
         functions=functions,
-    ):
-        if event.content:
-            parts.append(event.content)
-        if event.tool_calls:
-            tool_deltas.append(event.tool_calls)
-        if event.finish_reason:
-            finish = event.finish_reason
+    )
+    try:
+        for event in stream:
+            if event.content:
+                parts.append(event.content)
+            if event.tool_calls:
+                tool_deltas.append(event.tool_calls)
+            if event.finish_reason:
+                finish = event.finish_reason
+    finally:
+        close_iterator(stream)
 
     raw = "".join(parts)
     merged = _merge_tool_call_deltas(tool_deltas)
@@ -504,7 +535,7 @@ def iter_client_events(
         emitted = up_to
         return piece
 
-    for event in complete(
+    stream = complete(
         llm,
         messages,
         temperature=temperature,
@@ -514,21 +545,25 @@ def iter_client_events(
         tools=tools,
         tool_choice=tool_choice,
         functions=functions,
-    ):
-        if event.tool_calls:
-            tool_deltas.append(event.tool_calls)
-        if event.finish_reason:
-            finish = event.finish_reason
-        if not event.content:
-            continue
-        raw += event.content
-        mark = _TOOL_MARK.search(raw)
-        if mark:
-            piece = take(mark.start())
-        else:
-            piece = take(max(emitted, len(raw) - _HOLD))
-        if piece:
-            yield ChatDelta(content=piece)
+    )
+    try:
+        for event in stream:
+            if event.tool_calls:
+                tool_deltas.append(event.tool_calls)
+            if event.finish_reason:
+                finish = event.finish_reason
+            if not event.content:
+                continue
+            raw += event.content
+            mark = _TOOL_MARK.search(raw)
+            if mark:
+                piece = take(mark.start())
+            else:
+                piece = take(max(emitted, len(raw) - _HOLD))
+            if piece:
+                yield ChatDelta(content=piece)
+    finally:
+        close_iterator(stream)
 
     merged = _merge_tool_call_deltas(tool_deltas)
     parsed, _remainder = extract_tool_calls(raw)
@@ -564,16 +599,20 @@ def generate(
     Yields the model's raw output, reasoning tags included. Callers decide what
     to do with the `</think>` boundary.
     """
-    for event in complete(
+    stream = complete(
         llm,
         messages,
         temperature=temperature,
         top_p=top_p,
         top_k=top_k,
         max_tokens=max_tokens,
-    ):
-        if event.content:
-            yield event.content
+    )
+    try:
+        for event in stream:
+            if event.content:
+                yield event.content
+    finally:
+        close_iterator(stream)
 
 
 def smoke_test(llm) -> None:

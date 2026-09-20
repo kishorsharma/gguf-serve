@@ -88,6 +88,10 @@ class StubLlama:
         self._active = 0
         self.max_concurrent = 0
         self.chunks: list[dict] | None = None
+        self.resets = 0
+
+    def reset(self) -> None:
+        self.resets += 1
 
     def create_chat_completion(self, **kwargs):
         self.calls.append(kwargs)
@@ -1032,6 +1036,46 @@ def main() -> int:
         "only one generation runs at a time",
         llm.max_concurrent == 1,
         f"peak concurrency was {llm.max_concurrent}",
+    )
+
+    llm.resets = 0
+    gen = chat.complete(llm, [{"role": "user", "content": "hi"}])
+    next(gen)
+    gen.close()
+    check("closing a stream resets llama.cpp", llm.resets == 1, str(llm.resets))
+    check("closing a stream stops llama.cpp", llm._active == 0, str(llm._active))
+    check("closing a stream releases the lock", chat._lock.acquire(blocking=False))
+    chat._lock.release()
+    body = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    ).json()
+    check(
+        "a request after cancel still completes",
+        body["choices"][0]["message"]["content"] == ANSWER,
+        repr(body["choices"][0]["message"].get("content")),
+    )
+
+    llm.resets = 0
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+    ) as response:
+        for line in response.iter_lines():
+            if line:
+                break
+    check("http cancel stops llama.cpp", llm._active == 0, str(llm._active))
+    check("http cancel releases the lock", chat._lock.acquire(blocking=False))
+    chat._lock.release()
+    body = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    ).json()
+    check(
+        "a request after http cancel still completes",
+        body["choices"][0]["message"]["content"] == ANSWER,
+        repr(body["choices"][0]["message"].get("content")),
     )
 
     check.section("model source parsing")
